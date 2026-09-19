@@ -351,6 +351,7 @@ end
 
 local function isBossModel(model: Model): boolean
 	if registeredBosses[model.Name] then return true end
+	if model.Name:lower():find("boss", 1, true) then return true end
 	if CollectionService:HasTag(model, "Boss") or CollectionService:HasTag(model, "EventBoss") then
 		return true
 	end
@@ -478,6 +479,18 @@ local function scanNpcCatalog(): ({string}, {string})
 	return nextMobs, nextBosses
 end
 
+local function canonicalName(value: string): string
+	local result = value:lower():gsub("[^%w]", "")
+	if result:sub(-1) == "s" then result = result:sub(1, -2) end
+	return result
+end
+
+local function nameMatches(modelName: string, selected: string): boolean
+	local modelKey = canonicalName(modelName)
+	local selectedKey = canonicalName(selected)
+	return modelKey == selectedKey or modelKey:find(selectedKey, 1, true) ~= nil or selectedKey:find(modelKey, 1, true) ~= nil
+end
+
 local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Humanoid?, BasePart?)
 	local selected = targetName or (if bossOnly then State.selectedBoss else State.selectedMob)
 	if not selected then return nil, nil, nil end
@@ -493,7 +506,7 @@ local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Huma
 		seen[model] = true
 		local boss = isBossModel(model)
 		if bossOnly ~= boss then return end
-		if selected ~= "All" and model.Name ~= selected then return end
+		if selected ~= "All" and not nameMatches(model.Name, selected) then return end
 		local hum, root = candidate(model)
 		if hum and root then
 			local current = (root.Position - playerRoot.Position).Magnitude
@@ -857,7 +870,7 @@ supervise("target", 0.35, function()
 	if State.autoLevel then
 		local targetName = State.levelTarget
 		if targetName then
-			local isBossTarget = registeredBosses[targetName] == true
+			local isBossTarget = registeredBosses[targetName] == true or targetName:lower():find("boss", 1, true) ~= nil
 			local model, humanoid, root = nearestNpc(isBossTarget, targetName)
 			if model and humanoid and root then
 				State.travelDestination = nil
@@ -1028,6 +1041,23 @@ end
 local QUEST_TARGET_KEYS = { "QuestTarget", "TargetMob", "RequiredMob", "EnemyName", "MobName" }
 local QUEST_LEVEL_KEYS = { "RequiredLevel", "MinLevel", "LevelRequirement", "CombatLevel", "RequiredCombatLevel", "MinCombatLevel", "CombatRequiredLevel" }
 
+local function hudQuestProgress(): (string?, boolean?)
+	local gui = player:FindFirstChild("PlayerGui")
+	if not gui then return nil, nil end
+	for _, child in gui:GetDescendants() do
+		if child:IsA("TextLabel") and child.Visible then
+			local text = child.Text:gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+			local target, current, required = text:match("^(.-)%s+[Dd]efeated%s+(%d+)%s*/%s*(%d+)")
+			if not target then target, current, required = text:match("^[Dd]efeat%s+(.-)%s+(%d+)%s*/%s*(%d+)") end
+			if not target then target, current, required = text:match("^[Kk]ill%s+(.-)%s+(%d+)%s*/%s*(%d+)") end
+			if target and current and required then
+				return target:match("^%s*(.-)%s*$"), tonumber(current) >= tonumber(required)
+			end
+		end
+	end
+	return nil, nil
+end
+
 local function activeQuestTarget(): string?
 	local containers: {Instance} = { player }
 	local current = player:FindFirstChild("CurrentQuest")
@@ -1040,7 +1070,8 @@ local function activeQuestTarget(): string?
 		local target = field(container, QUEST_TARGET_KEYS)
 		if type(target) == "string" and target ~= "" then return target end
 	end
-	return nil
+	local hudTarget = hudQuestProgress()
+	return hudTarget
 end
 
 local function questComplete(): boolean
@@ -1052,10 +1083,12 @@ local function questComplete(): boolean
 	for _, container in containers do
 		if field(container, { "QuestCompleted", "IsComplete", "Completed" }) == true then return true end
 	end
-	return false
+	local _, completed = hudQuestProgress()
+	return completed == true
 end
 
-type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number, Target: string? }
+type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number, Target: string?, Dialogue: boolean, Confidence: number }
+local rejectedQuestGivers: {[Instance]: number} = {}
 local function bestQuest(level: number): QuestEntry?
 	local _, _, root = getCharacter()
 	if not root then return nil end
@@ -1064,20 +1097,27 @@ local function bestQuest(level: number): QuestEntry?
 	for prompt in trackedPrompts do
 		if prompt.Parent and prompt.Enabled then
 			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+			if (rejectedQuestGivers[giver] or 0) > os.clock() then continue end
 			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
 			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
 			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
 			local rawLevel = field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS)
 			local required = tonumber(rawLevel) or tonumber(tostring(rawLevel):match("%d+")) or 0
 			local target = field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS)
-			local questLike = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true or text:find("quest", 1, true) ~= nil
+			local dialogue = text:find("chat", 1, true) ~= nil or text:find("talk", 1, true) ~= nil
+			local structured = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true
+				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil
+			local questLike = structured or dialogue
 			if questLike and required <= level then
 				local position = promptPosition(prompt)
 				if position then
 					local distance = (position - root.Position).Magnitude
-					if not best or required > best.Level or (required == best.Level and distance < bestDistance) then
+					local confidence = if structured then 2 else 1
+					if not best or confidence > best.Confidence or (confidence == best.Confidence and required > best.Level)
+						or (confidence == best.Confidence and required == best.Level and distance < bestDistance) then
 						best = { Prompt = prompt, Giver = giver, Position = position, Level = required,
-							Target = if type(target) == "string" and target ~= "" then target else nil }
+							Target = if type(target) == "string" and target ~= "" then target else nil,
+							Dialogue = dialogue, Confidence = confidence }
 						bestDistance = distance
 					end
 				end
@@ -1087,6 +1127,84 @@ local function bestQuest(level: number): QuestEntry?
 	return best
 end
 
+type DialogueChoice = { Button: GuiButton, Text: string, Target: string, Level: number }
+local function guiVisible(instance: GuiObject): boolean
+	if instance.AbsoluteSize.X <= 1 or instance.AbsoluteSize.Y <= 1 then return false end
+	local current: Instance? = instance
+	while current and current:IsA("GuiObject") do
+		if not current.Visible then return false end
+		current = current.Parent
+	end
+	return true
+end
+
+local function buttonText(button: GuiButton): string
+	if button:IsA("TextButton") and button.Text ~= "" then return button.Text end
+	local longest = ""
+	for _, child in button:GetDescendants() do
+		if child:IsA("TextLabel") and child.Visible and #child.Text > #longest then longest = child.Text end
+	end
+	return longest
+end
+
+local function parseDialogueChoice(button: GuiButton, level: number): DialogueChoice?
+	local text = buttonText(button):gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+	if text == "" then return nil end
+	local lower = text:lower()
+	if lower == "close" or lower == "cancel" or lower == "leave" or lower == "goodbye" then return nil end
+	local questLike = lower:find("take", 1, true) or lower:find("defeat", 1, true)
+		or lower:find("kill", 1, true) or lower:find("hunt", 1, true) or lower:find("slay", 1, true)
+	local required = tonumber(lower:match("lv%s*%.?%s*(%d+)") or lower:match("level%s*(%d+)")) or 0
+	if not questLike and required == 0 then return nil end
+	if required > level then return nil end
+	local target = lower:gsub("%b()", ""):match("^%s*(.-)%s*$")
+	for _, prefix in { "i'll take ", "ill take ", "i will take ", "accept ", "defeat ", "kill ", "hunt ", "slay " } do
+		if target:sub(1, #prefix) == prefix then target = target:sub(#prefix + 1); break end
+	end
+	target = target:gsub("^%d+%s+", ""):gsub("^the%s+", ""):gsub("[%.!]+$", ""):match("^%s*(.-)%s*$")
+	if target == "" then return nil end
+	return { Button = button, Text = text, Target = target, Level = required }
+end
+
+local function activateGuiButton(button: GuiButton): boolean
+	local fireSignal = (global :: any).firesignal
+	if type(fireSignal) == "function" then
+		if button:IsA("TextButton") then return pcall(fireSignal, button.MouseButton1Click) end
+		return pcall(fireSignal, button.Activated)
+	end
+	return pcall(function() (button :: any):Activate() end)
+end
+
+local function dialogueChoice(level: number): (DialogueChoice?, GuiButton?, boolean)
+	local gui = player:FindFirstChild("PlayerGui")
+	if not gui then return nil, nil, false end
+	local best: DialogueChoice? = nil
+	local closeButton: GuiButton? = nil
+	local dialogueVisible = false
+	for _, child in gui:GetDescendants() do
+		if child:IsA("GuiButton") and guiVisible(child) then
+			local text = buttonText(child):gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+			local lower = text:lower()
+			if lower == "close" or lower == "cancel" or lower == "leave" then
+				closeButton = child
+				dialogueVisible = true
+			end
+			local choice = parseDialogueChoice(child, level)
+			if choice then
+				dialogueVisible = true
+				if not best or choice.Level > best.Level or (choice.Level == best.Level
+					and choice.Target:find("boss", 1, true) ~= nil and best.Target:find("boss", 1, true) == nil) then
+					best = choice
+				end
+			end
+		end
+	end
+	return best, closeButton, dialogueVisible
+end
+
+local pendingQuest: QuestEntry? = nil
+local dialogueDeadline = 0
+
 local function inspectQuestData()
 	print("[Lukiho] Level:", currentLevel(), "Active target:", activeQuestTarget(), "Complete:", questComplete())
 	local count = 0
@@ -1094,7 +1212,7 @@ local function inspectQuestData()
 		if prompt.Parent then
 			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
 			local text = (giver.Name .. " " .. prompt.ActionText .. " " .. prompt.ObjectText):lower()
-			if text:find("quest", 1, true) or text:find("talk", 1, true)
+			if text:find("quest", 1, true) or text:find("talk", 1, true) or text:find("chat", 1, true)
 				or CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver") then
 				count += 1
 				print("[Lukiho] Quest NPC:", giver:GetFullName(), "Action:", prompt.ActionText,
@@ -1104,6 +1222,9 @@ local function inspectQuestData()
 			end
 		end
 	end
+	local level = currentLevel() or 0
+	local choice, _, visible = dialogueChoice(level)
+	print("[Lukiho] Dialogue visible:", visible, "Eligible choice:", choice and choice.Text, "Parsed target:", choice and choice.Target)
 	print("[Lukiho] Quest NPC entries shown:", count)
 end
 
@@ -1119,6 +1240,7 @@ supervise("auto level", 1, function()
 	if not State.autoLevel then
 		State.levelTarget = nil
 		State.questGiver = nil
+		pendingQuest = nil
 		questStatus("Idle")
 		return
 	end
@@ -1131,6 +1253,28 @@ supervise("auto level", 1, function()
 		questStatus("Level data unavailable")
 		return
 	end
+	if pendingQuest then
+		local choice, closeButton, dialogueVisible = dialogueChoice(level)
+		if choice and activateGuiButton(choice.Button) then
+			State.levelTarget = choice.Target
+			State.questGiver = pendingQuest.Giver
+			questRetryAt = os.clock() + 45
+			pendingQuest = nil
+			State.travelDestination = nil
+			questStatus(string.format("Lv %d | Accepted: %s", level, choice.Text))
+			return
+		end
+		if os.clock() >= dialogueDeadline then
+			if dialogueVisible and closeButton then activateGuiButton(closeButton) end
+			rejectedQuestGivers[pendingQuest.Giver] = os.clock() + 60
+			questStatus(string.format("Lv %d | No eligible quest from %s", level, pendingQuest.Giver.Name))
+			pendingQuest = nil
+			questRetryAt = 0
+			return
+		end
+		questStatus(string.format("Lv %d | Reading %s's dialogue", level, pendingQuest.Giver.Name))
+		return
+	end
 	local quest = bestQuest(level)
 	local active = activeQuestTarget()
 	local completed = questComplete()
@@ -1138,6 +1282,7 @@ supervise("auto level", 1, function()
 	wasQuestComplete = completed
 	if completed then
 		State.levelTarget = nil
+		pendingQuest = nil
 		if justCompleted then questRetryAt = 0 end
 		clearTarget()
 	elseif active then
@@ -1169,10 +1314,16 @@ supervise("auto level", 1, function()
 		questStatus(string.format("Lv %d | Traveling to %s", level, quest.Giver.Name))
 	elseif os.clock() >= questRetryAt then
 		if usePrompt(quest.Prompt, 8) then
-			questRetryAt = os.clock() + 20
 			State.travelDestination = nil
-			State.levelTarget = quest.Target
-			questStatus(if quest.Target then "Quest requested: " .. quest.Target else "Quest requested; waiting for target data")
+			if quest.Dialogue then
+				pendingQuest = quest
+				dialogueDeadline = os.clock() + 6
+				questStatus(string.format("Lv %d | Opening %s", level, quest.Giver.Name))
+			else
+				questRetryAt = os.clock() + 20
+				State.levelTarget = quest.Target
+				questStatus(if quest.Target then "Quest requested: " .. quest.Target else "Quest requested; waiting for target data")
+			end
 		end
 	end
 end)
