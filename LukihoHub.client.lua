@@ -31,6 +31,7 @@ type StateType = {
 	holdSkill: boolean,
 	selectedSkill: string,
 	selectedSkills: {[string]: boolean},
+	selectedMob: string,
 	selectedBoss: string,
 	selectedTier: string,
 	weaponSlot: string,
@@ -62,6 +63,8 @@ type StateType = {
 	chestTarget: Instance?,
 	comboCount: number,
 	postKillUntil: number,
+	travelDestination: Vector3?,
+	manualTravel: boolean,
 }
 
 local State: StateType = {
@@ -75,6 +78,7 @@ local State: StateType = {
 	holdSkill = false,
 	selectedSkill = "Z",
 	selectedSkills = { Z = true, X = true, C = true, V = true, B = true },
+	selectedMob = "All",
 	selectedBoss = "All",
 	selectedTier = "All",
 	weaponSlot = "Slot 1",
@@ -84,7 +88,7 @@ local State: StateType = {
 	attackHeight = -6,
 	dodgeHeight = 22,
 	dodgeDuration = 0.7,
-	trackSpeed = 100,
+	trackSpeed = 180,
 	comboDelay = 0.28,
 	patrolInterval = 2,
 	fly = false,
@@ -106,6 +110,8 @@ local State: StateType = {
 	chestTarget = nil,
 	comboCount = 0,
 	postKillUntil = 0,
+	travelDestination = nil,
+	manualTravel = false,
 }
 
 local connections: {Connection} = {}
@@ -117,6 +123,10 @@ local library: any = nil
 local heldAction: string? = nil
 local lastEquip = 0
 local speedBaseline: {[Humanoid]: number} = {}
+local mobDropdown: any = nil
+local bossDropdown: any = nil
+local mobNames = { "All" }
+local bossNames = { "All" }
 
 local function connect(signal: RBXScriptSignal, callback: (...any) -> ()): Connection
 	local connection = signal:Connect(callback)
@@ -290,6 +300,74 @@ local function candidate(model: Model): (Humanoid?, BasePart?)
 	return nil, nil
 end
 
+local function isBossModel(model: Model): boolean
+	if CollectionService:HasTag(model, "Boss") or CollectionService:HasTag(model, "EventBoss") then
+		return true
+	end
+	if model:GetAttribute("IsBoss") == true or model:GetAttribute("Boss") == true then
+		return true
+	end
+	for _, attribute in { "NPCType", "EnemyType", "Type", "Rank" } do
+		local value = model:GetAttribute(attribute)
+		if type(value) == "string" and value:lower():find("boss", 1, true) then
+			return true
+		end
+	end
+	local bossValue = model:FindFirstChild("IsBoss") or model:FindFirstChild("Boss")
+	if bossValue and bossValue:IsA("BoolValue") and bossValue.Value then
+		return true
+	end
+	local bosses = Workspace:FindFirstChild("Bosses")
+	if bosses and model:IsDescendantOf(bosses) then
+		return true
+	end
+	local spawns = Workspace:FindFirstChild("BossSpawns")
+	return spawns ~= nil and spawns:FindFirstChild(model.Name) ~= nil
+end
+
+local function scanNpcCatalog(): ({string}, {string})
+	local mobs: {[string]: boolean} = {}
+	local bosses: {[string]: boolean} = {}
+	local seen: {[Model]: boolean} = {}
+	local function register(model: Model)
+		if seen[model] then return end
+		seen[model] = true
+		local humanoid, root = candidate(model)
+		if not humanoid or not root then return end
+		if isBossModel(model) then bosses[model.Name] = true else mobs[model.Name] = true end
+	end
+	local humanoids = Workspace:FindFirstChild("Humanoids")
+	if humanoids then
+		for _, item in humanoids:GetDescendants() do
+			if item:IsA("Model") then register(item) end
+		end
+	end
+	local bossFolder = Workspace:FindFirstChild("Bosses")
+	if bossFolder then
+		for _, item in bossFolder:GetDescendants() do
+			if item:IsA("Model") then register(item) end
+		end
+	end
+	for _, tag in { "Enemy", "Boss", "EventBoss" } do
+		for _, item in CollectionService:GetTagged(tag) do
+			if item:IsA("Model") then register(item) end
+		end
+	end
+	local spawns = Workspace:FindFirstChild("BossSpawns")
+	if spawns then
+		for _, marker in spawns:GetChildren() do bosses[marker.Name] = true end
+	end
+	local nextMobs: {string} = {}
+	local nextBosses: {string} = {}
+	for name in mobs do table.insert(nextMobs, name) end
+	for name in bosses do table.insert(nextBosses, name) end
+	table.sort(nextMobs)
+	table.sort(nextBosses)
+	table.insert(nextMobs, 1, "All")
+	table.insert(nextBosses, 1, "All")
+	return nextMobs, nextBosses
+end
+
 local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
 	local _, _, playerRoot = getCharacter()
 	if not playerRoot then return nil, nil, nil end
@@ -301,7 +379,10 @@ local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
 	local function consider(model: Model)
 		if seen[model] then return end
 		seen[model] = true
-		if bossOnly and State.selectedBoss ~= "All" and model.Name ~= State.selectedBoss then return end
+		local boss = isBossModel(model)
+		if bossOnly ~= boss then return end
+		local selected = if bossOnly then State.selectedBoss else State.selectedMob
+		if selected ~= "All" and model.Name ~= selected then return end
 		local hum, root = candidate(model)
 		if hum and root then
 			local current = (root.Position - playerRoot.Position).Magnitude
@@ -310,9 +391,15 @@ local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
 			end
 		end
 	end
-	local folder = Workspace:FindFirstChild(if bossOnly then "Bosses" else "Humanoids")
+	local folder = Workspace:FindFirstChild("Humanoids")
 	if folder then
 		for _, child in folder:GetDescendants() do
+			if child:IsA("Model") then consider(child) end
+		end
+	end
+	local bossFolder = Workspace:FindFirstChild("Bosses")
+	if bossFolder then
+		for _, child in bossFolder:GetDescendants() do
 			if child:IsA("Model") then consider(child) end
 		end
 	end
@@ -325,6 +412,17 @@ local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
 		end
 	end
 	return best, bestHum, bestRoot
+end
+
+local function travelToSelected(bossOnly: boolean)
+	local model, humanoid, root = nearestNpc(bossOnly)
+	if not model or not humanoid or not root then
+		warn("[Lukiho] No matching active " .. (if bossOnly then "boss" else "mob") .. " in search radius.")
+		return
+	end
+	State.travelDestination = nil
+	State.manualTravel = true
+	setTarget(model, humanoid, root)
 end
 
 local function ensureWeapon()
@@ -362,6 +460,34 @@ local function supervise(name: string, interval: number, callback: () -> ())
 		end
 	end)
 end
+
+local function sameValues(left: {string}, right: {string}): boolean
+	if #left ~= #right then return false end
+	for index, value in left do
+		if right[index] ~= value then return false end
+	end
+	return true
+end
+
+supervise("npc catalog", 2, function()
+	local nextMobs, nextBosses = scanNpcCatalog()
+	if not sameValues(mobNames, nextMobs) then
+		mobNames = nextMobs
+		if not table.find(mobNames, State.selectedMob) then State.selectedMob = "All" end
+		if mobDropdown then
+			mobDropdown:SetValues(mobNames)
+			mobDropdown:SetValue(State.selectedMob)
+		end
+	end
+	if not sameValues(bossNames, nextBosses) then
+		bossNames = nextBosses
+		if not table.find(bossNames, State.selectedBoss) then State.selectedBoss = "All" end
+		if bossDropdown then
+			bossDropdown:SetValues(bossNames)
+			bossDropdown:SetValue(State.selectedBoss)
+		end
+	end
+end)
 
 local function selectedChest(): Instance?
 	local folder = Workspace:FindFirstChild("Chests")
@@ -406,10 +532,10 @@ local function chestGuard(chest: Instance): (Model?, Humanoid?, BasePart?)
 end
 
 local function patrolBoss()
+	if State.travelDestination then return end
 	if os.clock() - State.lastPatrol < State.patrolInterval then return end
 	local folder = Workspace:FindFirstChild("BossSpawns")
-	local _, _, root = getCharacter()
-	if not folder or not root then return end
+	if not folder then return end
 	local choices: {Vector3} = {}
 	for _, marker in folder:GetChildren() do
 		if State.selectedBoss == "All" or marker.Name == State.selectedBoss then
@@ -423,16 +549,20 @@ local function patrolBoss()
 		end
 	end
 	if #choices == 0 then return end
-	State.lastPatrol = os.clock()
 	State.patrolIndex = (State.patrolIndex % #choices) + 1
-	root.CFrame = CFrame.new(choices[State.patrolIndex] + Vector3.new(0, 5, 0))
+	State.travelDestination = choices[State.patrolIndex] + Vector3.new(0, 5, 0)
 end
 
 local function attackCombo()
-	if not input or not live() or not activeTarget() or os.clock() < State.dodgingUntil then return end
+	if State.manualTravel or not input or not live() or not activeTarget() or os.clock() < State.dodgingUntil then return end
+	local _, _, playerRoot = getCharacter()
+	local targetRoot = State.targetRoot
+	if not playerRoot or not targetRoot or (playerRoot.Position - targetRoot.Position).Magnitude > math.max(14, State.attackOffset + 9) then
+		return
+	end
 	ensureWeapon()
 	for hit = 1, 5 do
-		if not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then break end
+		if State.manualTravel or not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then break end
 		if os.clock() < State.dodgingUntil then break end
 		press("Combat", 0.05)
 		State.comboCount = readCombo()
@@ -442,12 +572,19 @@ local function attackCombo()
 end
 
 supervise("target", 0.35, function()
-	if not live() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then
+	if not live() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.manualTravel) then
 		clearTarget()
 		State.chestTarget = nil
+		State.travelDestination = nil
+		State.manualTravel = false
 		return
 	end
 	if activeTarget() then return end
+	if State.manualTravel then
+		State.manualTravel = false
+		clearTarget()
+		return
+	end
 	if State.targetHumanoid and State.targetHumanoid.Health <= 0 then
 		State.postKillUntil = os.clock() + 3
 	end
@@ -466,6 +603,7 @@ supervise("target", 0.35, function()
 	end
 	local model, humanoid, root = nearestNpc(State.autoBoss)
 	if model and humanoid and root then
+		State.travelDestination = nil
 		setTarget(model, humanoid, root)
 	elseif State.autoBoss then
 		patrolBoss()
@@ -473,12 +611,13 @@ supervise("target", 0.35, function()
 end)
 
 supervise("combat", 0.12, function()
-	if not State.holdSkill and (State.autoFarm or State.autoBoss or State.autoChestFarm) then
+	if not State.manualTravel and not State.holdSkill and (State.autoFarm or State.autoBoss or State.autoChestFarm) then
 		attackCombo()
 	end
 end)
 
 supervise("skills", 0.15, function()
+	if State.manualTravel then releaseHold(); return end
 	if not input or not live() then releaseHold(); return end
 	if not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then releaseHold(); return end
 	if State.holdSkill then
@@ -553,13 +692,14 @@ supervise("loot", 0.6, function()
 			if tierMatches(chest) and chest:GetAttribute("IsOpen") ~= true then
 				local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
 				if State.autoChestFarm and chest == State.chestTarget and chest:GetAttribute("Locked") ~= true then
-					local _, _, root = getCharacter()
-					if root and prompt then
+					if prompt then
 						local position = promptPosition(prompt)
-						if position then root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) end
+						if position then State.travelDestination = position + Vector3.new(0, 3, 0) end
 					end
 				end
-				if prompt and chest:GetAttribute("Locked") ~= true then usePrompt(prompt, State.lootRadius) end
+				if prompt and chest:GetAttribute("Locked") ~= true then
+					usePrompt(prompt, if State.autoChestFarm then 8 else State.lootRadius)
+				end
 			end
 		end
 	end
@@ -569,17 +709,38 @@ connect(RunService.Heartbeat, function(dt: number)
 	if not live() then return end
 	local character, humanoid, root = getCharacter()
 	if not character or not humanoid or not root then return end
-	if activeTarget() and (State.autoFarm or State.autoBoss or State.autoChestFarm) then
+	local automationMoving = activeTarget() and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.manualTravel)
+	local destination: CFrame? = nil
+	if automationMoving then
 		local targetRoot = State.targetRoot :: BasePart
 		local targetFrame = targetRoot.CFrame
 		local height = if os.clock() < State.dodgingUntil then State.dodgeHeight else State.attackHeight
 		local position = (targetFrame * CFrame.new(0, height, State.attackOffset)).Position
-		local destination = CFrame.lookAt(position, targetFrame.Position)
-		local alpha = math.clamp(dt * State.trackSpeed, 0, 1)
-		root.CFrame = root.CFrame:Lerp(destination, alpha)
-		root.AssemblyLinearVelocity = Vector3.zero
+		destination = CFrame.lookAt(position, targetFrame.Position)
+	elseif State.travelDestination and (State.autoBoss or State.autoChestFarm) then
+		local travel = State.travelDestination :: Vector3
+		destination = CFrame.lookAt(travel, travel + root.CFrame.LookVector)
 	end
-	if State.noclip then
+	if destination then
+		local delta = destination.Position - root.Position
+		local distance = delta.Magnitude
+		local step = math.min(distance, State.trackSpeed * dt)
+		local nextPosition = if distance > 0.01 then root.Position + delta.Unit * step else destination.Position
+		local rotation = destination.Rotation
+		root.CFrame = CFrame.new(nextPosition) * rotation
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		if State.manualTravel and distance <= 2 then
+			State.manualTravel = false
+			clearTarget()
+		end
+		if State.travelDestination and not automationMoving and distance <= 2 then
+			State.travelDestination = nil
+			State.lastPatrol = os.clock()
+		end
+	end
+	local autoNoClip = destination ~= nil
+	if State.noclip or autoNoClip then
 		for _, part in character:GetDescendants() do
 			if part:IsA("BasePart") then
 				if collisionStates[part] == nil then collisionStates[part] = part.CanCollide end
@@ -660,6 +821,8 @@ local function loadRemote(path: string): any
 	return chunk()
 end
 
+mobNames, bossNames = scanNpcCatalog()
+
 local loaded, failure = xpcall(function()
 	library = loadRemote("Library.lua")
 	local theme: any = loadRemote("addons/ThemeManager.lua")
@@ -681,11 +844,22 @@ local loaded, failure = xpcall(function()
 			if other and other.Value then other:SetValue(false) end
 		end
 	end })
+	mobDropdown = farm:AddDropdown("LukihoMobFilter", {
+		Text = "Detected Mob",
+		Values = mobNames,
+		Default = 1,
+		Searchable = true,
+		Callback = function(value: string)
+			State.selectedMob = value
+			clearTarget()
+		end,
+	})
+	farm:AddButton({ Text = "Travel to Selected Mob", Func = function() travelToSelected(false) end })
 	farm:AddSlider("LukihoRadius", { Text = "Search Radius", Min = 50, Max = 5000, Default = 1000, Rounding = 0, Callback = function(value: number) State.searchRadius = value end })
 	farm:AddSlider("LukihoOffset", { Text = "Behind Target", Min = 0, Max = 20, Default = 4.5, Rounding = 1, Callback = function(value: number) State.attackOffset = value end })
 	farm:AddSlider("LukihoHeight", { Text = "Attack Height", Min = -20, Max = 20, Default = -6, Rounding = 1, Callback = function(value: number) State.attackHeight = value end })
 	farm:AddSlider("LukihoDodge", { Text = "Dodge Height", Min = 0, Max = 50, Default = 22, Rounding = 0, Callback = function(value: number) State.dodgeHeight = value end })
-	farm:AddSlider("LukihoTrack", { Text = "Track Response", Min = 1, Max = 100, Default = 100, Rounding = 0, Callback = function(value: number) State.trackSpeed = value end })
+	farm:AddSlider("LukihoTrack", { Text = "NoClip Travel Speed", Min = 20, Max = 1000, Default = 180, Rounding = 0, Suffix = " studs/s", Callback = function(value: number) State.trackSpeed = value end })
 	local combat = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Combat & Skills", IconName = "zap" })
 	combat:AddDropdown("LukihoWeapon", { Text = "Weapon Slot", Values = { "None", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5" }, Default = 2, Callback = function(value: string) State.weaponSlot = value end })
 	combat:AddSlider("LukihoCombo", { Text = "Combo Interval", Min = 0.2, Max = 0.5, Default = 0.28, Rounding = 2, Callback = function(value: number) State.comboDelay = value end })
@@ -702,27 +876,18 @@ local loaded, failure = xpcall(function()
 			if other and other.Value then other:SetValue(false) end
 		end
 	end })
-	local bossNames = { "All" }
-	local registeredBosses: {[string]: boolean} = {}
-	for _, item in CollectionService:GetTagged("Boss") do
-		if item:IsA("Model") then registeredBosses[item.Name] = true end
-	end
-	for _, item in CollectionService:GetTagged("EventBoss") do
-		if item:IsA("Model") then registeredBosses[item.Name] = true end
-	end
-	local bossesFolder = Workspace:FindFirstChild("Bosses")
-	if bossesFolder then
-		for _, item in bossesFolder:GetChildren() do
-			if item:IsA("Model") then registeredBosses[item.Name] = true end
-		end
-	end
-	local spawns = Workspace:FindFirstChild("BossSpawns")
-	if spawns then
-		for _, item in spawns:GetChildren() do registeredBosses[item.Name] = true end
-	end
-	for name in registeredBosses do table.insert(bossNames, name) end
-	table.sort(bossNames)
-	bosses:AddDropdown("LukihoBossFilter", { Text = "Boss Filter", Values = bossNames, Default = 1, Callback = function(value: string) State.selectedBoss = value; clearTarget() end })
+	bossDropdown = bosses:AddDropdown("LukihoBossFilter", {
+		Text = "Detected Boss",
+		Values = bossNames,
+		Default = 1,
+		Searchable = true,
+		Callback = function(value: string)
+			State.selectedBoss = value
+			clearTarget()
+			State.travelDestination = nil
+		end,
+	})
+	bosses:AddButton({ Text = "Travel to Selected Boss", Func = function() travelToSelected(true) end })
 	bosses:AddSlider("LukihoPatrol", { Text = "Patrol Interval", Min = 0.5, Max = 5, Default = 2, Rounding = 1, Callback = function(value: number) State.patrolInterval = value end })
 	local movement = tabs.Movement:AddGroupbox({ Side = "Left", Name = "Movement", IconName = "navigation" })
 	local fly = movement:AddToggle("LukihoFly", { Text = "Fly", Default = false, Callback = function(value: boolean) State.fly = value end })
