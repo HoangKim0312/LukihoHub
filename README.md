@@ -82,10 +82,11 @@ equipped weapon off.
 
 Auto Skill Keys and Hold Skill Keys are independent multi-select controls. Auto Cast
 can use the known Z/X/C/V/B input mapping before the skill provider or `SHC` cooldown
-folder has initialized, rechecks those modules after respawn, and briefly pauses the
-normal attack input while casting near the target. It still respects cooldown markers
-when they are available and does not remove server cooldowns. Holding multiple actions
-depends on what the game's InputHandler supports. ESP displays up to 250 nearest
+folder has initialized and rechecks those modules after respawn. Skill input runs
+alongside the original five-hit normal attack combo, so enabling Auto Cast does not
+truncate the M1 chain. It still respects cooldown markers when they are available and
+does not remove server cooldowns. Holding multiple actions depends on what the game's
+InputHandler supports. ESP displays up to 250 nearest
 replicated mobs, bosses, quest NPCs, and interactable prompts within a configurable
 10,000-stud radius. Loot Radius is a **search radius**: auto-loot travels toward a
 matching drop and only activates its prompt within `MaxActivationDistance`.

@@ -148,7 +148,6 @@ local flyVelocity: BodyVelocity? = nil
 local library: any = nil
 local heldActions: {[string]: string} = {}
 local skillCursor = 0
-local skillCastUntil = 0
 local lastEquip = 0
 local equipReadyAt = 0
 local assumedWeaponSlot: number? = nil
@@ -1101,7 +1100,6 @@ connect(player.CharacterAdded, function()
 	lastEquip = 0
 	State.lastSkill = 0
 	skillCursor = 0
-	skillCastUntil = 0
 	equipReadyAt = os.clock() + 1.5
 	task.spawn(function()
 		for _ = 1, 40 do
@@ -1248,7 +1246,7 @@ end
 
 local function attackCombo()
 	if State.manualTravel or not refreshInputHandler() or not live() or not activeTarget()
-		or os.clock() < State.dodgingUntil or os.clock() < skillCastUntil then return end
+		or os.clock() < State.dodgingUntil then return end
 	local _, _, playerRoot = getCharacter()
 	local targetRoot = State.targetRoot
 	if not playerRoot or not targetRoot or (playerRoot.Position - targetRoot.Position).Magnitude > math.max(14, State.attackOffset + 9) then
@@ -1257,7 +1255,7 @@ local function attackCombo()
 	if not weaponReadyForCombat() then return end
 	for hit = 1, 5 do
 		if State.manualTravel or not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then break end
-		if os.clock() < State.dodgingUntil or os.clock() < skillCastUntil then break end
+		if os.clock() < State.dodgingUntil then break end
 		press("Combat", 0.05)
 		State.comboCount = readCombo()
 		if hit < 5 then task.wait(State.comboDelay) end
@@ -1360,12 +1358,7 @@ supervise("skills", 0.15, function()
 		return
 	end
 	releaseHold()
-	if State.autoSkills and os.clock() >= State.dodgingUntil and os.clock() - State.lastSkill > 0.85 then
-		local _, _, playerRoot = getCharacter()
-		local targetRoot = State.targetRoot
-		if not playerRoot or not targetRoot or (playerRoot.Position - targetRoot.Position).Magnitude > math.max(22, State.attackOffset + 15) then
-			return
-		end
+	if State.autoSkills and os.clock() - State.lastSkill > 1 then
 		local keys = { "Z", "X", "C", "V", "B" }
 		for offset = 1, #keys do
 			local index = (skillCursor + offset - 1) % #keys + 1
@@ -1375,9 +1368,7 @@ supervise("skills", 0.15, function()
 				if skillReady(name) then
 					State.lastSkill = os.clock()
 					skillCursor = index
-					skillCastUntil = os.clock() + 0.75
-					release("Combat")
-					press(action, 0.12)
+					press(action, 0.05)
 					break
 				end
 			end
