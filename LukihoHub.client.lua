@@ -983,36 +983,40 @@ local function field(instance: Instance?, keys: {string}): any
 end
 
 local function currentLevel(): number?
-	local keys = { "CombatLevel", "Combat_Level", "Level", "Lvl" }
+	local keys = { "Level", "Lvl", "PlayerLevel" }
 	local containers: {Instance} = { player }
 	local stats = player:FindFirstChild("leaderstats")
-	local data = player:FindFirstChild("Data")
+	local data = player:FindFirstChild("Data") or player:FindFirstChild("PlayerData")
 	if stats then table.insert(containers, stats) end
-	if data then table.insert(containers, data) end
+	if data then
+		table.insert(containers, data)
+		local nestedStats = data:FindFirstChild("Stats")
+		if nestedStats then table.insert(containers, nestedStats) end
+	end
 	if player.Character then table.insert(containers, player.Character) end
 	for _, container in containers do
-		local level = tonumber(field(container, keys))
+		local raw = field(container, keys)
+		local level: number? = tonumber(raw)
+		if not level and type(raw) == "string" then level = tonumber(raw:match("^[Ll][Vv]%s*(%d+)$")) end
 		if level then return level end
 	end
 	local gui = player:FindFirstChild("PlayerGui")
 	if gui then
-		local explicit: number? = nil
-		local generic: {[number]: boolean} = {}
+		local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+		local hudLevels: {[number]: boolean} = {}
 		for _, child in gui:GetDescendants() do
 			if child:IsA("TextLabel") and child.Visible then
-				local text = child.Text
 				local path = child:GetFullName():lower()
-				if not path:find("mastery", 1, true) and not text:lower():find("mastery", 1, true) then
-					local level = tonumber(text:match("[Ll][Vv]%s*%.?%s*(%d+)") or text:match("[Ll]evel%s*(%d+)"))
-					if level then
-						if child.Name:lower():find("level", 1, true) then explicit = level else generic[level] = true end
-					end
+				if not path:find("mastery", 1, true) and not child.Text:lower():find("mastery", 1, true) then
+					local level = tonumber(child.Text:match("^%s*[Ll][Vv]%s*%.?%s*(%d+)"))
+					local position = child.AbsolutePosition
+					local inPlayerHud = viewport and position.X < viewport.X * 0.4 and position.Y > viewport.Y * 0.55
+					if level and inPlayerHud then hudLevels[level] = true end
 				end
 			end
 		end
-		if explicit then return explicit end
 		local only: number? = nil
-		for value in generic do
+		for value in hudLevels do
 			if only then return nil end
 			only = value
 		end
@@ -1505,15 +1509,41 @@ local loaded, failure = xpcall(function()
 	local theme: any = loadRemote("addons/ThemeManager.lua")
 	local saves: any = loadRemote("addons/SaveManager.lua")
 	library.ForceCheckbox = false
-	local window = library:CreateWindow({ Title = "Lukiho", Footer = "Created by Lukiho", NotifySide = "Right" })
+	library.IsLightTheme = true
+	theme:SetLibrary(library)
+	theme:SetDefaultTheme({
+		FontColor = "21344e",
+		MainColor = "ffffff",
+		AccentColor = "89bbf2",
+		BackgroundColor = "edf3f9",
+		OutlineColor = "c9d8e8",
+		FontFace = "Gotham",
+	})
+	local compactLayout = Workspace.CurrentCamera ~= nil and Workspace.CurrentCamera.ViewportSize.X < 760
+	local window = library:CreateWindow({
+		Title = "LUKIHO",
+		Footer = "Created by Lukiho",
+		Size = UDim2.fromOffset(920, 620),
+		CornerRadius = 6,
+		Font = Enum.Font.Gotham,
+		NotifySide = "Right",
+		ShowCustomCursor = false,
+		GlobalSearch = true,
+		SidebarCompacted = compactLayout,
+		MinSidebarWidth = 166,
+		MinContainerWidth = 280,
+		TabButtonsStyle = { Gap = 6, Padding = 10, CornerRadius = 6, Indicator = true, IndicatorWidth = 3, IndicatorHeight = 18 },
+		Animations = { ToggleWindow = true, TabSwitch = true, Groupbox = false, Dropdown = true, KeyPicker = true },
+	})
 	local tabs = {
 		Farm = window:AddTab("Farm", "swords"),
+		Combat = window:AddTab("Combat", "zap"),
 		Movement = window:AddTab("Movement", "navigation"),
-		Loot = window:AddTab("Chests & Loot", "package"),
+		Loot = window:AddTab("Loot", "package"),
 		ESP = window:AddTab("ESP", "eye"),
-		Settings = window:AddTab("UI Settings", "settings"),
+		Settings = window:AddTab("Settings", "settings"),
 	}
-	local farm = tabs.Farm:AddGroupbox({ Side = "Left", Name = "Mob Farming", IconName = "swords" })
+	local farm = tabs.Farm:AddGroupbox({ Side = "Left", Name = "Mob Targets", IconName = "swords" })
 	farm:AddToggle("LukihoAutoFarm", { Text = "Auto Farm Mobs", Default = false, Callback = function(value: boolean)
 		State.autoFarm = value
 		if value then
@@ -1537,13 +1567,13 @@ local loaded, failure = xpcall(function()
 			clearTarget()
 		end,
 	})
-	farm:AddButton({ Text = "Travel to Selected Mob", Func = function() travelToSelected(false) end })
+	farm:AddButton({ Text = "Go to Mob", Tooltip = "Move to the selected mob or its registered spawn.", Func = function() travelToSelected(false) end })
 	farm:AddSlider("LukihoRadius", { Text = "Search Radius", Min = 50, Max = 5000, Default = 1000, Rounding = 0, Callback = function(value: number) State.searchRadius = value end })
 	farm:AddSlider("LukihoOffset", { Text = "Behind Target", Min = 0, Max = 20, Default = 4.5, Rounding = 1, Callback = function(value: number) State.attackOffset = value end })
 	farm:AddSlider("LukihoHeight", { Text = "Attack Height", Min = -20, Max = 20, Default = -6, Rounding = 1, Callback = function(value: number) State.attackHeight = value end })
 	farm:AddSlider("LukihoDodge", { Text = "Dodge Height", Min = 0, Max = 50, Default = 22, Rounding = 0, Callback = function(value: number) State.dodgeHeight = value end })
-	farm:AddSlider("LukihoTrack", { Text = "NoClip Travel Speed", Min = 20, Max = 1000, Default = 180, Rounding = 0, Suffix = " studs/s", Callback = function(value: number) State.trackSpeed = value end })
-	local leveling = tabs.Farm:AddGroupbox({ Side = "Left", Name = "Auto Level", IconName = "map-pin" })
+	farm:AddSlider("LukihoTrack", { Text = "Travel Speed", Min = 20, Max = 1000, Default = 180, Rounding = 0, Suffix = " studs/s", Callback = function(value: number) State.trackSpeed = value end })
+	local leveling = tabs.Farm:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "Quest Route", IconName = "map-pin" })
 	leveling:AddToggle("LukihoAutoLevel", { Text = "Auto Level", Default = false, Callback = function(value: boolean)
 		State.autoLevel = value
 		if value then
@@ -1560,8 +1590,8 @@ local loaded, failure = xpcall(function()
 		end
 	end })
 	questStatusLabel = leveling:AddLabel("Idle")
-	leveling:AddButton({ Text = "Inspect Quest Data", Func = inspectQuestData })
-	local combat = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Combat & Skills", IconName = "zap" })
+	leveling:AddButton({ Text = "Inspect Quest", Tooltip = "Print quest NPC metadata to the developer console.", Func = inspectQuestData })
+	local combat = tabs.Combat:AddGroupbox({ Side = "Left", Name = "Loadout", IconName = "swords" })
 	weaponDropdown = combat:AddDropdown("LukihoWeapon", {
 		Text = "Hotbar Item",
 		Values = weaponNames,
@@ -1572,11 +1602,12 @@ local loaded, failure = xpcall(function()
 		end,
 	})
 	combat:AddSlider("LukihoCombo", { Text = "Combo Interval", Min = 0.2, Max = 0.5, Default = 0.28, Rounding = 2, Callback = function(value: number) State.comboDelay = value end })
-	combat:AddToggle("LukihoSkills", { Text = "Auto Cast Ready Skills", Default = false, Callback = function(value: boolean) State.autoSkills = value end })
-	combat:AddDropdown("LukihoSkillKeys", { Text = "Auto Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.selectedSkills = value end })
-	combat:AddToggle("LukihoHold", { Text = "Hold Selected Skills", Default = false, Callback = function(value: boolean) State.holdSkill = value; if not value then releaseHold() end end })
-	combat:AddDropdown("LukihoHoldKeys", { Text = "Hold Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.holdSkillKeys = value end })
-	local bosses = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Bosses", IconName = "skull" })
+	local skills = tabs.Combat:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "Skills", IconName = "zap" })
+	skills:AddToggle("LukihoSkills", { Text = "Auto Cast", Default = false, Callback = function(value: boolean) State.autoSkills = value end })
+	skills:AddDropdown("LukihoSkillKeys", { Text = "Auto Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.selectedSkills = value end })
+	skills:AddToggle("LukihoHold", { Text = "Hold Skills", Default = false, Callback = function(value: boolean) State.holdSkill = value; if not value then releaseHold() end end })
+	skills:AddDropdown("LukihoHoldKeys", { Text = "Hold Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.holdSkillKeys = value end })
+	local bosses = tabs.Farm:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "World Bosses", IconName = "skull" })
 	bosses:AddToggle("LukihoBoss", { Text = "Farm Registered Bosses", Default = false, Callback = function(value: boolean)
 		State.autoBoss = value
 		if value then
@@ -1600,15 +1631,15 @@ local loaded, failure = xpcall(function()
 			State.travelDestination = nil
 		end,
 	})
-	bosses:AddButton({ Text = "Travel to Selected Boss", Func = function() travelToSelected(true) end })
+	bosses:AddButton({ Text = "Go to Boss", Tooltip = "Move to the selected boss or its registered spawn.", Func = function() travelToSelected(true) end })
 	bosses:AddSlider("LukihoPatrol", { Text = "Patrol Interval", Min = 0.5, Max = 5, Default = 2, Rounding = 1, Callback = function(value: number) State.patrolInterval = value end })
-	local movement = tabs.Movement:AddGroupbox({ Side = "Left", Name = "Movement", IconName = "navigation" })
+	local movement = tabs.Movement:AddGroupbox({ Side = "Left", Name = "Traversal", IconName = "navigation" })
 	local fly = movement:AddToggle("LukihoFly", { Text = "Fly", Default = false, Callback = function(value: boolean) State.fly = value end })
 	fly:AddKeyPicker("LukihoFlyKey", { Text = "Fly", Default = "F", SyncToggleState = true })
 	movement:AddSlider("LukihoFlySpeed", { Text = "Fly Speed", Min = 10, Max = 450, Default = 80, Rounding = 0, Callback = function(value: number) State.flySpeed = value end })
 	local clip = movement:AddToggle("LukihoClip", { Text = "NoClip", Default = false, Callback = function(value: boolean) State.noclip = value end })
 	clip:AddKeyPicker("LukihoClipKey", { Text = "NoClip", Default = "N", SyncToggleState = true })
-	local speed = tabs.Movement:AddGroupbox({ Side = "Right", Name = "Speed & Jump", IconName = "zap" })
+	local speed = tabs.Movement:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "Speed & Jump", IconName = "zap" })
 	speed:AddToggle("LukihoSpeed", { Text = "Custom Walk Speed", Default = false, Callback = function(value: boolean) State.speed = value end })
 	speed:AddSlider("LukihoSpeedValue", { Text = "Walk Speed", Min = 16, Max = 200, Default = 32, Rounding = 0, Callback = function(value: number) State.speedValue = value end })
 	speed:AddToggle("LukihoCFrame", { Text = "CFrame Speed", Default = false, Callback = function(value: boolean) State.cframeSpeed = value end })
@@ -1629,17 +1660,13 @@ local loaded, failure = xpcall(function()
 	esp:AddToggle("LukihoESPQuests", { Text = "Quest NPCs", Default = true, Callback = function(value: boolean) State.espQuests = value end })
 	esp:AddToggle("LukihoESPItems", { Text = "Interactables", Default = true, Callback = function(value: boolean) State.espInteractables = value end })
 	local settings = tabs.Settings:AddGroupbox({ Side = "Left", Name = "Interface", IconName = "settings" })
-	settings:AddLabel("Created by Lukiho")
-	settings:AddLabel("RightControl toggles this menu")
-	settings:AddLabel("Cooldowns remain server-authoritative")
 	settings:AddLabel("Menu Keybind"):AddKeyPicker("LukihoMenuKey", { Default = "RightControl", NoUI = true, Text = "Menu", Mode = "Toggle" })
 	library.ToggleKeybind = library.Options.LukihoMenuKey
 	settings:AddButton({ Text = "Unload Hub", Func = unload })
-	theme:SetLibrary(library)
 	saves:SetLibrary(library)
 	saves:IgnoreThemeSettings()
 	saves:SetIgnoreIndexes({ "LukihoMenuKey" })
-	theme:SetFolder("LukihoHub")
+	theme:SetFolder("LukihoHub/Light")
 	saves:SetFolder("LukihoHub/configs")
 	saves:BuildConfigSection(tabs.Settings)
 	theme:ApplyToTab(tabs.Settings)
