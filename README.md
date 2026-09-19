@@ -62,7 +62,11 @@ player level is retained when the HUD is temporarily hidden.
 Before choosing a new quest, Auto Level opens every detected quest conversation and
 caches only kill/defeat/hunt/slay choices that explicitly include a positive level,
 such as `I'll take the bandit boss (Lv 7)`. Choices without a level are never treated
-as level zero. After the scan, it selects the highest quest level not exceeding the
+as level zero. A generic `Talk`, `Chat`, `Interact`, or Humanoid NPC is not enough to
+enter this scan: the giver must also expose a quest tag, quest folder, quest attribute,
+quest prompt text, level, or target metadata. Explicit delivery, letter, gathering,
+collection, talk, and escort quest types are excluded unless they provide a mob target.
+After the scan, it selects the highest quest level not exceeding the
 player's current level, accepts that exact choice, derives the mob target, completes
 the objective, and returns to repeat it. Whenever a higher eligible quest becomes
 available, the next selection moves to that NPC. **Rescan Quest NPCs** clears the

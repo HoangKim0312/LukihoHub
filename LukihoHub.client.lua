@@ -1587,19 +1587,20 @@ local function questGivers(): {QuestEntry}
 			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
 			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
 			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
-			local npcModel: Model? = if giver:IsA("Model") then giver else giver:FindFirstAncestorOfClass("Model") :: Model?
-			local interactiveNpc = npcModel ~= nil and Players:GetPlayerFromCharacter(npcModel) == nil
-				and npcModel:FindFirstChildOfClass("Humanoid") ~= nil
-				and (text:find("interact", 1, true) ~= nil or text:find("speak", 1, true) ~= nil
-					or text:find("conversation", 1, true) ~= nil)
 			local rawLevel = field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS)
 			local required = parseLevelValue(rawLevel) or tonumber(tostring(rawLevel):match("%d+")) or 0
 			local target = field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS)
+			local rawKind = field(prompt, { "QuestType", "QuestCategory", "ObjectiveType", "TaskType" })
+				or field(giver, { "QuestType", "QuestCategory", "ObjectiveType", "TaskType" })
+			local kind = if rawKind ~= nil then tostring(rawKind):lower() else ""
+			local explicitlyNonCombat = kind:find("delivery", 1, true) ~= nil or kind:find("letter", 1, true) ~= nil
+				or kind:find("gather", 1, true) ~= nil or kind:find("collect", 1, true) ~= nil
+				or kind:find("talk", 1, true) ~= nil or kind:find("escort", 1, true) ~= nil
 			local dialogue = text:find("chat", 1, true) ~= nil or text:find("talk", 1, true) ~= nil
-				or interactiveNpc or ((tagged or questFolder ~= nil) and target == nil)
+				or ((tagged or questFolder ~= nil) and target == nil)
 			local structured = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true
 				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil
-			local questLike = structured or dialogue
+			local questLike = structured and (not explicitlyNonCombat or target ~= nil)
 			if questLike then
 				local position = promptPosition(prompt)
 				if position then
