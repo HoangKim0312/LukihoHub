@@ -560,20 +560,43 @@ local function travelToSelected(bossOnly: boolean)
 	setTarget(model, humanoid, root)
 end
 
-local function ensureWeapon()
-	local selectedSlot = State.weaponSlot
-	if not selectedSlot or os.clock() - lastEquip < 0.6 then return end
-	local index = tostring(selectedSlot)
+local TOOLBAR_ACTIONS = {
+	[1] = "Toolbar_1st",
+	[2] = "Toolbar_2nd",
+	[3] = "Toolbar_3rd",
+	[4] = "Toolbar_4th",
+	[5] = "Toolbar_5th",
+}
+
+local function hotbarSlotSelected(index: number): boolean
 	local toolbar = player:FindFirstChild("PlayerGui")
 	local holder = toolbar and toolbar:FindFirstChild("ComponentsHolder")
 	local bottom = holder and holder:FindFirstChild("BottomHolder")
 	local bar = bottom and bottom:FindFirstChild("Toolbar")
 	local skills = bar and bar:FindFirstChild("SkillHolder")
-	local slot = skills and skills:FindFirstChild(index .. "_ToolPosition")
+	local slot = skills and skills:FindFirstChild(tostring(index) .. "_ToolPosition")
 	local selection = slot and slot:FindFirstChild("CircleSelect")
-	if selection and selection:IsA("ImageLabel") and selection.ImageTransparency < 0.72 then return end
-	local action = ({ ["1"] = "Toolbar_1st", ["2"] = "Toolbar_2nd", ["3"] = "Toolbar_3rd", ["4"] = "Toolbar_4th", ["5"] = "Toolbar_5th" })[index]
-	if action then lastEquip = os.clock(); press(action, 0.04) end
+	if selection and (selection:IsA("ImageLabel") or selection:IsA("ImageButton")) then
+		return selection.Visible and selection.ImageTransparency < 0.72
+	end
+	return false
+
+end
+
+
+local function equipWeaponSlot(index: number, force: boolean?): boolean
+	local action = TOOLBAR_ACTIONS[index]
+	if not input or not action then return false end
+	if not force and hotbarSlotSelected(index) then return true end
+	if not force and os.clock() - lastEquip < 0.6 then return false end
+	lastEquip = os.clock()
+	press(action, 0.06)
+	return true
+end
+
+local function ensureWeapon()
+	local selectedSlot = State.weaponSlot
+	if selectedSlot then equipWeaponSlot(selectedSlot, false) end
 end
 
 local function activeTarget(): boolean
@@ -703,20 +726,13 @@ local function scanHotbar(): ({string}, {[string]: number})
 	local holder = hotbarHolder()
 	local names: {string} = {}
 	local slots: {[string]: number} = {}
-	if holder then
-		for index = 1, 5 do
-			local slot = holder:FindFirstChild(index .. "_ToolPosition")
-			if slot then
-				local name, occupied = slotItemName(slot, index)
-				if occupied then
-					local label = string.format("%d - %s", index, name or "Name unavailable")
-					table.insert(names, label)
-					slots[label] = index
-				end
-			end
-		end
+	for index = 1, 5 do
+		local slot = holder and holder:FindFirstChild(index .. "_ToolPosition")
+		local name = if slot then select(1, slotItemName(slot, index)) else nil
+		local label = if name then string.format("%d - %s", index, name) else tostring(index)
+		table.insert(names, label)
+		slots[label] = index
 	end
-	if #names == 0 then table.insert(names, "Hotbar not detected") end
 	return names, slots
 end
 
@@ -753,6 +769,12 @@ supervise("hotbar catalog", 2, function()
 	if weaponDropdown then
 		weaponDropdown:SetValues(weaponNames)
 		weaponDropdown:SetValue(selectedLabel)
+	end
+end)
+
+supervise("weapon equip", 0.75, function()
+	if State.weaponSlot and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then
+		ensureWeapon()
 	end
 end)
 
@@ -1337,20 +1359,31 @@ end
 local function isLootPrompt(prompt: ProximityPrompt): boolean
 	local drops = Workspace:FindFirstChild("LootDrops")
 	if drops and prompt:IsDescendantOf(drops) then return true end
-	if CollectionService:HasTag(prompt, "LootDrop") then return true end
-	local text = (prompt.Name .. " " .. prompt.ActionText):lower()
+	for _, tag in { "LootDrop", "Loot", "Drop", "Collectible" } do
+		if CollectionService:HasTag(prompt, tag) then return true end
+		if prompt.Parent and CollectionService:HasTag(prompt.Parent, tag) then return true end
+	end
+	local owner = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+	if owner and (owner:GetAttribute("IsLoot") == true or owner:GetAttribute("DroppedItem") == true
+		or owner:GetAttribute("IsDrop") == true or owner:GetAttribute("Loot") == true) then return true end
+	local path = prompt:GetFullName():lower()
+	if path:find("lootdrop", 1, true) or path:find("drops", 1, true) or path:find("reward", 1, true) then return true end
+	local text = (prompt.Name .. " " .. prompt.ActionText .. " " .. prompt.ObjectText):lower()
 	return text:find("loot", 1, true) ~= nil or text:find("pick up", 1, true) ~= nil
 		or text:find("pickup", 1, true) ~= nil or text:find("collect", 1, true) ~= nil
 		or text:find("claim", 1, true) ~= nil or text:find("take", 1, true) ~= nil
+		or text:find("grab", 1, true) ~= nil
 end
 
+local lastLootAttempt: {[ProximityPrompt]: number} = {}
 local function nearestLootPrompt(): (ProximityPrompt?, number)
 	local _, _, root = getCharacter()
 	if not root then return nil, math.huge end
 	local nearest: ProximityPrompt? = nil
 	local distance = State.lootRadius
 	for prompt in trackedPrompts do
-		if prompt.Parent and prompt.Enabled and isLootPrompt(prompt) then
+		local attempted = lastLootAttempt[prompt] or 0
+		if prompt.Parent and prompt.Enabled and os.clock() - attempted >= 0.45 and isLootPrompt(prompt) then
 			local position = promptPosition(prompt)
 			if position then
 				local current = (position - root.Position).Magnitude
@@ -1361,9 +1394,8 @@ local function nearestLootPrompt(): (ProximityPrompt?, number)
 	return nearest, distance
 end
 
-local lastLootAttempt: {[ProximityPrompt]: number} = {}
-supervise("loot", 0.6, function()
-	local collecting = State.autoLoot or os.clock() < State.postKillUntil
+supervise("loot", 0.2, function()
+	local collecting = State.autoLoot or State.autoChestFarm or os.clock() < State.postKillUntil
 	if (not collecting or State.autoLevel) and State.lootPrompt then
 		State.lootPrompt = nil
 		State.travelDestination = nil
@@ -1376,18 +1408,18 @@ supervise("loot", 0.6, function()
 	for prompt in lastLootAttempt do
 		if not prompt.Parent then lastLootAttempt[prompt] = nil end
 	end
+	local handledLoot = false
 	if collecting then
 		local prompt, distance = nearestLootPrompt()
 		if prompt then
+			handledLoot = true
 			local activation = math.max(1, prompt.MaxActivationDistance - 1)
 			if distance <= activation then
 				if State.lootPrompt == prompt then State.travelDestination = nil end
 				State.lootPrompt = nil
-				if os.clock() - (lastLootAttempt[prompt] or 0) > 2 then
-					lastLootAttempt[prompt] = os.clock()
-					usePrompt(prompt, activation)
-				end
-			elseif not activeTarget() and not State.autoLevel and not State.manualTravel and not State.autoChestFarm then
+				lastLootAttempt[prompt] = os.clock()
+				usePrompt(prompt, activation)
+			elseif not activeTarget() and not State.autoLevel and not State.manualTravel then
 				local position = promptPosition(prompt)
 				if position then
 					State.lootPrompt = prompt
@@ -1399,6 +1431,7 @@ supervise("loot", 0.6, function()
 			State.travelDestination = nil
 		end
 	end
+	if handledLoot or State.lootPrompt then return end
 	local chests = Workspace:FindFirstChild("Chests")
 	if chests and (State.autoChest or State.autoChestFarm) then
 		for _, chest in chests:GetChildren() do
@@ -1411,7 +1444,9 @@ supervise("loot", 0.6, function()
 					end
 				end
 				if prompt and chest:GetAttribute("Locked") ~= true then
-					usePrompt(prompt, if State.autoChestFarm then 8 else State.lootRadius)
+					if usePrompt(prompt, if State.autoChestFarm then 8 else State.lootRadius) then
+						State.postKillUntil = math.max(State.postKillUntil, os.clock() + 8)
+					end
 				end
 			end
 		end
@@ -1759,12 +1794,15 @@ local loaded, failure = xpcall(function()
 	leveling:AddButton({ Text = "Inspect Quest", Tooltip = "Print quest NPC metadata to the developer console.", Func = inspectQuestData })
 	local combat = tabs.Combat:AddGroupbox({ Side = "Left", Name = "Loadout", IconName = "swords" })
 	weaponDropdown = combat:AddDropdown("LukihoWeapon", {
-		Text = "Hotbar Item",
+		Text = "Hotbar Slot",
 		Values = weaponNames,
 		AllowNull = true,
 		Searchable = true,
 		Callback = function(value: string?)
 			State.weaponSlot = if value then weaponSlots[value] else nil
+			if State.weaponSlot then
+				task.spawn(equipWeaponSlot, State.weaponSlot, true)
+			end
 		end,
 	})
 	combat:AddSlider("LukihoCombo", { Text = "Combo Interval", Min = 0.2, Max = 0.5, Default = 0.28, Rounding = 2, Callback = function(value: number) State.comboDelay = value end })
