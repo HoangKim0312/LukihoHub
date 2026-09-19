@@ -16,9 +16,10 @@ if not scriptName then
 end
 
 local hubUrl = BASE_URL .. scriptName
+local requestUrl = hubUrl .. "?cache=" .. tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
 
 local fetched, source = pcall(function()
-	return (game :: any):HttpGet(hubUrl)
+	return (game :: any):HttpGet(requestUrl)
 end)
 if not fetched then
 	error("[Lukiho] Could not fetch hub. Check repository visibility, branch, and filename: " .. tostring(source))

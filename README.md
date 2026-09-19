@@ -21,11 +21,13 @@ Upload both `loader.lua` and `LukihoHub.client.lua` to the root of the public
 `HoangKim0312/LukihoHub` repository on its `main` branch. The shared entry point is:
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/loader.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/loader.lua?cache=" .. tostring(os.time())))()
 ```
 
 The loader fetches the hub from the same repository and reports fetch/compile/start
-errors. It does not hide the hub source: both files must be publicly accessible to
+errors. Both the shared command and the loader's hub request use a cache-busting query,
+so executors do not keep running an older raw GitHub response after an update. It does
+not hide the hub source: both files must be publicly accessible to
 an unauthenticated client. Verify both raw URLs in a signed-out browser before sharing.
 It only loads `LukihoHub.client.lua` when `game.GameId` is `5595353122`; the hub
 also checks this ID when called directly. This covers root place `16205713724` and
