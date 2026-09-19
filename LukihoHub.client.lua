@@ -2,6 +2,10 @@
 -- Lukiho Automation Console. Run only in an experience you own and can test.
 -- Game-specific module paths below are taken from the supplied reference script.
 
+if game.PlaceId ~= 16205713724 then
+	return
+end
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
