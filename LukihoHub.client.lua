@@ -1501,6 +1501,21 @@ local function loadRemote(path: string): any
 	return chunk()
 end
 
+local function polishSliderTypography(screenGui: ScreenGui)
+	for _, descendant in screenGui:GetDescendants() do
+		if descendant:IsA("UIStroke") and descendant.ApplyStrokeMode == Enum.ApplyStrokeMode.Contextual then
+			local textObject = descendant.Parent
+			local bar = textObject and textObject.Parent
+			if textObject and (textObject:IsA("TextLabel") or textObject:IsA("TextBox"))
+				and bar and bar:IsA("TextButton") then
+				descendant.Enabled = false
+				textObject.Font = Enum.Font.Gotham
+				textObject.TextSize = 12
+			end
+		end
+	end
+end
+
 mobNames, bossNames = scanNpcCatalog()
 weaponNames, weaponSlots = scanHotbar()
 
@@ -1509,14 +1524,14 @@ local loaded, failure = xpcall(function()
 	local theme: any = loadRemote("addons/ThemeManager.lua")
 	local saves: any = loadRemote("addons/SaveManager.lua")
 	library.ForceCheckbox = false
-	library.IsLightTheme = true
+	library.IsLightTheme = false
 	theme:SetLibrary(library)
 	theme:SetDefaultTheme({
-		FontColor = "21344e",
-		MainColor = "ffffff",
-		AccentColor = "89bbf2",
-		BackgroundColor = "edf3f9",
-		OutlineColor = "c9d8e8",
+		FontColor = "eef1f5",
+		MainColor = "24272d",
+		AccentColor = "5598d6",
+		BackgroundColor = "181a1e",
+		OutlineColor = "41464f",
 		FontFace = "Gotham",
 	})
 	local compactLayout = Workspace.CurrentCamera ~= nil and Workspace.CurrentCamera.ViewportSize.X < 760
@@ -1666,11 +1681,12 @@ local loaded, failure = xpcall(function()
 	saves:SetLibrary(library)
 	saves:IgnoreThemeSettings()
 	saves:SetIgnoreIndexes({ "LukihoMenuKey" })
-	theme:SetFolder("LukihoHub/Light")
+	theme:SetFolder("LukihoHub/Graphite")
 	saves:SetFolder("LukihoHub/configs")
 	saves:BuildConfigSection(tabs.Settings)
 	theme:ApplyToTab(tabs.Settings)
 	saves:LoadAutoloadConfig()
+	polishSliderTypography(library.ScreenGui)
 end, function(message) return tostring(message) end)
 
 if not loaded then
