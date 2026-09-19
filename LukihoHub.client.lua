@@ -40,6 +40,8 @@ type StateType = {
 	espInteractables: boolean,
 	selectedMob: string?,
 	selectedBoss: string?,
+	selectedArea: string?,
+	selectedTravelTarget: string?,
 	selectedTier: string,
 	weaponSlot: number?,
 	searchRadius: number,
@@ -98,6 +100,8 @@ local State: StateType = {
 	espInteractables = true,
 	selectedMob = nil,
 	selectedBoss = nil,
+	selectedArea = nil,
+	selectedTravelTarget = nil,
 	selectedTier = "All",
 	weaponSlot = nil,
 	searchRadius = 1000,
@@ -144,13 +148,23 @@ local flyVelocity: BodyVelocity? = nil
 local library: any = nil
 local heldActions: {[string]: string} = {}
 local skillCursor = 0
+local skillCastUntil = 0
 local lastEquip = 0
+local equipReadyAt = 0
+local assumedWeaponSlot: number? = nil
+local weaponAutomationActive = false
+local updatingWeaponDropdown = false
+local weaponNameCache: {[number]: string} = {}
 local speedBaseline: {[Humanoid]: number} = {}
 local mobDropdown: any = nil
 local bossDropdown: any = nil
 local weaponDropdown: any = nil
+local areaDropdown: any = nil
+local travelTargetDropdown: any = nil
 local mobNames = { "All" }
 local bossNames = { "All" }
+local areaNames = { "No areas detected" }
+local travelTargetNames = { "No NPCs or mobs detected" }
 local weaponNames: {string} = {}
 local weaponSlots: {[string]: number} = {}
 local observedMobs: {[string]: boolean} = {}
@@ -158,6 +172,15 @@ local observedBosses: {[string]: boolean} = {}
 local registeredBosses: {[string]: boolean} = {}
 local bossSpawnPositions: {[string]: Vector3} = {}
 local npcSpawnPositions: {[string]: Vector3} = {}
+local areaPositions: {[string]: Vector3} = {}
+type TravelEntry = {
+	name: string,
+	instance: Instance?,
+	position: Vector3?,
+	bossOnly: boolean?,
+	enemy: boolean,
+}
+local travelTargets: {[string]: TravelEntry} = {}
 local questStatusLabel: any = nil
 local trackedPrompts: {[ProximityPrompt]: boolean} = {}
 
@@ -210,29 +233,47 @@ if not input or type(input.VirtualPress) ~= "function" or type(input.VirtualRele
 	warn("[Lukiho] InputHandler missing or incompatible; combat controls disabled.")
 end
 
-local function press(action: string, duration: number)
-	if not input then return end
+local function refreshInputHandler(): boolean
+	if not input or type(input.VirtualPress) ~= "function" or type(input.VirtualRelease) ~= "function" then
+		input = requirePath(ReplicatedStorage, { "CAM", "Client", "Components", "Client", "InputHandler" })
+	end
+	return input ~= nil and type(input.VirtualPress) == "function" and type(input.VirtualRelease) == "function"
+end
+
+local function press(action: string, duration: number): boolean
+	if not refreshInputHandler() then return false end
 	local ok, err = pcall(function()
 		input.VirtualPress(action)
 		task.wait(duration)
 		input.VirtualRelease(action)
 	end)
 	if not ok then warn("[Lukiho] Input action failed:", action, err) end
+	return ok
 end
 
 local function release(action: string)
-	if input then pcall(function() input.VirtualRelease(action) end) end
+	if refreshInputHandler() then pcall(function() input.VirtualRelease(action) end) end
 end
 
 local function skillAction(key: string): (string, string?)
 	local fallback = { Z = "Skills_2nd", X = "Skills_3rd", C = "Skills_4th", V = "Skills_5th", B = "Skills_6th" }
+	if not skillsProvider then
+		skillsProvider = requirePath(ReplicatedStorage, { "CAM", "Client", "Controllers", "Skills_Provider" })
+	end
 	if skillsProvider and type(skillsProvider.get_current_keys) == "function" then
 		local ok, entries = pcall(skillsProvider.get_current_keys)
+		if not ok then ok, entries = pcall(skillsProvider.get_current_keys, skillsProvider) end
 		if ok and type(entries) == "table" then
 			local ordinals = { "1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th" }
 			for index, entry in entries do
-				if type(entry) == "table" and entry.Key == key then
-					return "Skills_" .. (ordinals[index] or tostring(index)), entry.Name
+				if type(entry) == "table" then
+					local rawKey = tostring(entry.Key or entry.KeyCode or entry.Bind or entry.Hotkey or ""):upper()
+					local entryKey = rawKey:match("([A-Z])$") or rawKey
+					if entryKey == key then
+						local name = entry.Name or entry.SkillName or entry.Skill
+						local action = if type(index) == "number" then "Skills_" .. (ordinals[index] or tostring(index)) else fallback[key]
+						return action or fallback.Z, if type(name) == "string" then name else nil
+					end
 				end
 			end
 		end
@@ -242,8 +283,15 @@ end
 
 local function skillReady(skillName: string?): boolean
 	local character = player.Character
+	if not character then return false end
 	local status = character and character:FindFirstChild("SHC")
-	return skillName ~= nil and status ~= nil and status:FindFirstChild(skillName) == nil
+	if not skillName or not status then return true end
+	if status:FindFirstChild(skillName) then return false end
+	local wanted = skillName:lower():gsub("[^%w]", "")
+	for _, marker in status:GetChildren() do
+		if marker.Name:lower():gsub("[^%w]", "") == wanted then return false end
+	end
+	return true
 end
 
 local function releaseHold()
@@ -379,11 +427,167 @@ end
 local function readPosition(value: any): Vector3?
 	if typeof(value) == "Vector3" then return value end
 	if typeof(value) == "CFrame" then return value.Position end
+	if typeof(value) == "Region3" then return value.CFrame.Position end
 	if type(value) ~= "string" then return nil end
 	local x, y, z = value:match("([^,]+),%s*([^,]+),%s*([^,]+)")
 	if not x or not y or not z then return nil end
 	local px, py, pz = tonumber(x), tonumber(y), tonumber(z)
 	return if px and py and pz then Vector3.new(px, py, pz) else nil
+end
+
+local function instancePosition(instance: Instance?): Vector3?
+	if not instance or not instance.Parent then return nil end
+	if instance:IsA("BasePart") then return instance.Position end
+	if instance:IsA("Attachment") then return instance.WorldPosition end
+	if instance:IsA("Model") then return instance:GetPivot().Position end
+	if instance:IsA("ProximityPrompt") then return instancePosition(instance.Parent) end
+	local part = instance:FindFirstChildWhichIsA("BasePart", true)
+	return if part then part.Position else nil
+end
+
+local function tablePosition(value: any): Vector3?
+	local direct = readPosition(value)
+	if direct then return direct end
+	if type(value) ~= "table" then return nil end
+	for _, key in { "Position", "CFrame", "Location", "Spawn", "Point", "Center", "Coordinates", "Coords" } do
+		local position = readPosition(value[key])
+		if position then return position end
+	end
+	local minimum = readPosition(value.Min or value.Minimum)
+	local maximum = readPosition(value.Max or value.Maximum)
+	if minimum and maximum then return minimum:Lerp(maximum, 0.5) end
+	return nil
+end
+
+local AREA_CONTAINERS: {[string]: boolean} = {
+	areas = true,
+	fasttravel = true,
+	locations = true,
+	mapmarkers = true,
+	regions = true,
+	regionmarkers = true,
+	spawnlocations = true,
+	teleportlocations = true,
+	waypoints = true,
+}
+
+local AREA_MODULE_KEYS = {
+	"Areas", "AreaSpawns", "FastTravel", "Locations", "MapMarkers", "Regions",
+	"RegionSpawns", "TeleportLocations", "Waypoints", "WorldLocations",
+}
+
+local function scanTravelCatalog(): ({string}, {[string]: Vector3}, {string}, {[string]: TravelEntry})
+	local nextAreas: {[string]: Vector3} = {}
+	local nextTargets: {[string]: TravelEntry} = {}
+	local function addArea(name: any, position: Vector3?)
+		if type(name) ~= "string" or name == "" or not position then return end
+		nextAreas[name] = position
+	end
+	local function addTarget(label: string, entry: TravelEntry)
+		if label == "" then return end
+		nextTargets[label] = entry
+	end
+
+	if not regions then regions = requirePath(ReplicatedStorage, { "Regions" }) end
+	if type(regions) == "table" then
+		local visited: {[any]: boolean} = {}
+		local function readAreaTable(node: any, depth: number)
+			if type(node) ~= "table" or visited[node] or depth > 4 then return end
+			visited[node] = true
+			for key, value in node do
+				local entryName = if type(value) == "table" and type(value.Name) == "string" then value.Name else tostring(key)
+				local position = tablePosition(value)
+				if position and type(key) ~= "number" then addArea(entryName, position) end
+				if type(value) == "table" and not position then readAreaTable(value, depth + 1) end
+			end
+		end
+		for _, key in AREA_MODULE_KEYS do readAreaTable(regions[key], 1) end
+	end
+
+	for _, item in Workspace:GetDescendants() do
+		local parent = item.Parent
+		if parent and AREA_CONTAINERS[parent.Name:lower()] then
+			local displayName = item:GetAttribute("DisplayName") or item:GetAttribute("AreaName")
+				or item:GetAttribute("RegionName") or item:GetAttribute("LocationName") or item.Name
+			addArea(displayName, instancePosition(item))
+		end
+		for _, key in { "AreaName", "RegionName", "LocationName" } do
+			local name = item:GetAttribute(key)
+			if type(name) == "string" and name ~= "" then
+				addArea(name, instancePosition(item))
+				break
+			end
+		end
+		if item:IsA("SpawnLocation") then addArea(item.Name, item.Position) end
+	end
+	for _, tag in { "Area", "FastTravel", "Location", "Region", "Teleport", "Waypoint" } do
+		for _, item in CollectionService:GetTagged(tag) do
+			local displayName = item:GetAttribute("DisplayName") or item:GetAttribute("AreaName")
+				or item:GetAttribute("RegionName") or item.Name
+			addArea(displayName, instancePosition(item))
+		end
+	end
+
+	for _, name in mobNames do
+		if name ~= "All" then
+			addTarget("Mob - " .. name, {
+				name = name,
+				position = npcSpawnPositions[name],
+				instance = nil,
+				bossOnly = false,
+				enemy = true,
+			})
+		end
+	end
+	for _, name in bossNames do
+		if name ~= "All" then
+			addTarget("Boss - " .. name, {
+				name = name,
+				position = bossSpawnPositions[name],
+				instance = nil,
+				bossOnly = true,
+				enemy = true,
+			})
+		end
+	end
+	local function addFixedNpc(instance: Instance)
+		local model = if instance:IsA("Model") then instance else instance:FindFirstAncestorOfClass("Model")
+		local target = model or instance
+		local position = instancePosition(target)
+		if not position then return end
+		local displayName = target:GetAttribute("DisplayName") or target:GetAttribute("NPCName") or target.Name
+		if type(displayName) == "string" and displayName ~= "" then
+			addTarget("NPC - " .. displayName, {
+				name = displayName,
+				instance = target,
+				position = position,
+				bossOnly = nil,
+				enemy = false,
+			})
+		end
+	end
+	for prompt in trackedPrompts do
+		if prompt.Parent then
+			local text = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
+			if text:find("talk", 1, true) or text:find("chat", 1, true) or text:find("quest", 1, true)
+				or text:find("shop", 1, true) or text:find("train", 1, true) then
+				addFixedNpc(prompt)
+			end
+		end
+	end
+	for _, tag in { "NPC", "QuestGiver", "QuestNPC", "Merchant", "Trainer" } do
+		for _, item in CollectionService:GetTagged(tag) do addFixedNpc(item) end
+	end
+
+	local nextAreaNames: {string} = {}
+	for name in nextAreas do table.insert(nextAreaNames, name) end
+	table.sort(nextAreaNames)
+	if #nextAreaNames == 0 then table.insert(nextAreaNames, "No areas detected") end
+	local nextTargetNames: {string} = {}
+	for name in nextTargets do table.insert(nextTargetNames, name) end
+	table.sort(nextTargetNames)
+	if #nextTargetNames == 0 then table.insert(nextTargetNames, "No NPCs or mobs detected") end
+	return nextAreaNames, nextAreas, nextTargetNames, nextTargets
 end
 
 local function refreshGameCatalog()
@@ -491,7 +695,7 @@ local function nameMatches(modelName: string, selected: string): boolean
 	return modelKey == selectedKey or modelKey:find(selectedKey, 1, true) ~= nil or selectedKey:find(modelKey, 1, true) ~= nil
 end
 
-local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Humanoid?, BasePart?)
+local function nearestNpc(bossOnly: boolean, targetName: string?, maxDistance: number?): (Model?, Humanoid?, BasePart?)
 	local selected = targetName or (if bossOnly then State.selectedBoss else State.selectedMob)
 	if not selected then return nil, nil, nil end
 	local _, _, playerRoot = getCharacter()
@@ -499,7 +703,7 @@ local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Huma
 	local best: Model? = nil
 	local bestHum: Humanoid? = nil
 	local bestRoot: BasePart? = nil
-	local distance = State.searchRadius
+	local distance = maxDistance or State.searchRadius
 	local seen: {[Model]: boolean} = {}
 	local function consider(model: Model)
 		if seen[model] then return end
@@ -538,8 +742,16 @@ local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Huma
 	return best, bestHum, bestRoot
 end
 
+local function beginManualTravel()
+	State.lootPrompt = nil
+	State.chestTarget = nil
+	State.travelDestination = nil
+	State.manualTravel = true
+	clearTarget()
+end
+
 local function travelToSelected(bossOnly: boolean)
-	local model, humanoid, root = nearestNpc(bossOnly)
+	local model, humanoid, root = nearestNpc(bossOnly, nil, math.huge)
 	if not model or not humanoid or not root then
 		local selectedName = if bossOnly then State.selectedBoss else State.selectedMob
 		local position: Vector3? = nil
@@ -547,17 +759,59 @@ local function travelToSelected(bossOnly: boolean)
 			position = if bossOnly then bossSpawnPositions[selectedName] else npcSpawnPositions[selectedName]
 		end
 		if position then
-			clearTarget()
+			beginManualTravel()
 			State.travelDestination = position + Vector3.new(0, 5, 0)
-			State.manualTravel = true
 			return
 		end
 		warn("[Lukiho] Select an active " .. (if bossOnly then "boss" else "mob") .. " or one with a known spawn position.")
 		return
 	end
-	State.travelDestination = nil
-	State.manualTravel = true
+	beginManualTravel()
 	setTarget(model, humanoid, root)
+end
+
+local function travelToPosition(position: Vector3)
+	beginManualTravel()
+	State.travelDestination = position + Vector3.new(0, 5, 0)
+end
+
+local function travelToArea()
+	local selected = State.selectedArea
+	local position = selected and areaPositions[selected]
+	if not position then
+		warn("[Lukiho] Select a detected area before travelling.")
+		return
+	end
+	travelToPosition(position)
+end
+
+local function travelToCatalogTarget()
+	local selected = State.selectedTravelTarget
+	local entry = selected and travelTargets[selected]
+	if not entry then
+		warn("[Lukiho] Select a detected NPC or mob before travelling.")
+		return
+	end
+	if entry.enemy and entry.bossOnly ~= nil then
+		local model, humanoid, root = nearestNpc(entry.bossOnly == true, entry.name, math.huge)
+		if model and humanoid and root then
+			beginManualTravel()
+			setTarget(model, humanoid, root)
+			return
+		end
+	end
+	local position = instancePosition(entry.instance) or entry.position
+	if position then
+		travelToPosition(position)
+	else
+		warn("[Lukiho] The selected destination is not currently available.")
+	end
+end
+
+local function cancelManualTravel()
+	State.manualTravel = false
+	State.travelDestination = nil
+	clearTarget()
 end
 
 local TOOLBAR_ACTIONS = {
@@ -568,28 +822,85 @@ local TOOLBAR_ACTIONS = {
 	[5] = "Toolbar_5th",
 }
 
-local function hotbarSlotSelected(index: number): boolean
+local function instanceSlot(instance: Instance?): number?
+	if not instance then return nil end
+	for _, key in { "HotbarSlot", "ToolbarSlot", "SlotIndex", "Slot" } do
+		local number = tonumber(tostring(instance:GetAttribute(key)):match("%d+"))
+		if number then return number end
+	end
+	return nil
+end
+
+local function characterEquippedSlot(): number?
+	local character = player.Character
+	if not character then return nil end
+	for _, child in character:GetChildren() do
+		if child:IsA("Tool") then
+			local slot = instanceSlot(child)
+			if slot then return slot end
+		end
+	end
+	return nil
+end
+
+local function providerEquippedSlot(): number?
+	if not characterInfo or type(characterInfo.Get_equipped_tool) ~= "function" then return nil end
+	local ok, equipped = pcall(characterInfo.Get_equipped_tool, player)
+	if not ok then ok, equipped = pcall(characterInfo.Get_equipped_tool, characterInfo, player) end
+	if not ok then return nil end
+	if typeof(equipped) == "Instance" then
+		local slot = instanceSlot(equipped)
+		if slot then return slot end
+		for index, name in weaponNameCache do
+			if name:lower():gsub("[^%w]", "") == equipped.Name:lower():gsub("[^%w]", "") then return index end
+		end
+	elseif type(equipped) == "string" then
+		for index, name in weaponNameCache do
+			if name:lower():gsub("[^%w]", "") == equipped:lower():gsub("[^%w]", "") then return index end
+		end
+	end
+	return nil
+end
+
+local function uiSelectedHotbarSlot(): number?
 	local toolbar = player:FindFirstChild("PlayerGui")
 	local holder = toolbar and toolbar:FindFirstChild("ComponentsHolder")
 	local bottom = holder and holder:FindFirstChild("BottomHolder")
 	local bar = bottom and bottom:FindFirstChild("Toolbar")
 	local skills = bar and bar:FindFirstChild("SkillHolder")
-	local slot = skills and skills:FindFirstChild(tostring(index) .. "_ToolPosition")
-	local selection = slot and slot:FindFirstChild("CircleSelect")
-	if selection and (selection:IsA("ImageLabel") or selection:IsA("ImageButton")) then
-		return selection.Visible and selection.ImageTransparency < 0.72
+	if not skills then return nil end
+	for index = 1, 5 do
+		local slot = skills:FindFirstChild(tostring(index) .. "_ToolPosition")
+		local selection = slot and slot:FindFirstChild("CircleSelect")
+		if selection and (selection:IsA("ImageLabel") or selection:IsA("ImageButton"))
+			and selection.Visible and selection.ImageTransparency < 0.72 then
+			return index
+		end
 	end
-	return false
-
+	return nil
 end
 
+local function hotbarSlotSelected(index: number): boolean?
+	if assumedWeaponSlot == index and os.clock() - lastEquip < 4 then return true end
+	local equipped = characterEquippedSlot() or providerEquippedSlot()
+	if equipped then
+		if equipped == index then assumedWeaponSlot = index end
+		return equipped == index
+	end
+	if assumedWeaponSlot == index then return true end
+	local selected = uiSelectedHotbarSlot()
+	return if selected then selected == index else nil
+end
 
 local function equipWeaponSlot(index: number, force: boolean?): boolean
 	local action = TOOLBAR_ACTIONS[index]
-	if not input or not action then return false end
-	if not force and hotbarSlotSelected(index) then return true end
-	if not force and os.clock() - lastEquip < 0.6 then return false end
+	if not action or not refreshInputHandler() then return false end
+	local selected = hotbarSlotSelected(index)
+	if selected == true then return true end
+	if selected == nil and not force then return false end
+	if os.clock() - lastEquip < 0.8 then return false end
 	lastEquip = os.clock()
+	assumedWeaponSlot = index
 	press(action, 0.06)
 	return true
 end
@@ -597,6 +908,14 @@ end
 local function ensureWeapon()
 	local selectedSlot = State.weaponSlot
 	if selectedSlot then equipWeaponSlot(selectedSlot, false) end
+end
+
+local function weaponReadyForCombat(): boolean
+	local selectedSlot = State.weaponSlot
+	if not selectedSlot then return true end
+	if os.clock() < equipReadyAt then return false end
+	ensureWeapon()
+	return hotbarSlotSelected(selectedSlot) == true
 end
 
 local function activeTarget(): boolean
@@ -714,7 +1033,9 @@ local function slotItemName(slot: Instance, index: number): (string?, boolean)
 		local selected = slot:FindFirstChild("CircleSelect")
 		if selected and selected:IsA("ImageLabel") and selected.ImageTransparency < 0.72 then
 			local ok, equipped = pcall(characterInfo.Get_equipped_tool, player)
+			if not ok then ok, equipped = pcall(characterInfo.Get_equipped_tool, characterInfo, player) end
 			if ok and typeof(equipped) == "Instance" then return equipped.Name, true end
+			if ok and type(equipped) == "string" and equipped ~= "" then return equipped, true end
 		end
 	end
 	return nil, hasIcon
@@ -729,12 +1050,70 @@ local function scanHotbar(): ({string}, {[string]: number})
 	for index = 1, 5 do
 		local slot = holder and holder:FindFirstChild(index .. "_ToolPosition")
 		local name = if slot then select(1, slotItemName(slot, index)) else nil
-		local label = if name then string.format("%d - %s", index, name) else tostring(index)
+		if name then weaponNameCache[index] = name end
+		local stableName = name or weaponNameCache[index]
+		local label = if stableName then string.format("%d - %s", index, stableName) else tostring(index)
 		table.insert(names, label)
 		slots[label] = index
 	end
 	return names, slots
 end
+
+local function refreshHotbarCatalog()
+	local nextNames, nextSlots = scanHotbar()
+	if sameValues(weaponNames, nextNames) then return end
+	local selectedIndex = State.weaponSlot
+	weaponNames, weaponSlots = nextNames, nextSlots
+	local selectedLabel: string? = nil
+	if selectedIndex then
+		for label, index in weaponSlots do
+			if index == selectedIndex then selectedLabel = label; break end
+		end
+	end
+	if weaponDropdown then
+		updatingWeaponDropdown = true
+		local ok, err = pcall(function()
+			weaponDropdown:SetValues(weaponNames)
+			weaponDropdown:SetValue(selectedLabel)
+		end)
+		updatingWeaponDropdown = false
+		if not ok then error(err) end
+	end
+end
+
+connect(player.CharacterRemoving, function()
+	releaseHold()
+	clearTarget()
+	assumedWeaponSlot = nil
+	weaponAutomationActive = false
+end)
+
+connect(player.CharacterAdded, function()
+	releaseHold()
+	clearTarget()
+	for part, canCollide in collisionStates do
+		if part.Parent then part.CanCollide = canCollide end
+	end
+	table.clear(collisionStates)
+	table.clear(speedBaseline)
+	assumedWeaponSlot = nil
+	weaponAutomationActive = false
+	lastEquip = 0
+	State.lastSkill = 0
+	skillCursor = 0
+	skillCastUntil = 0
+	equipReadyAt = os.clock() + 1.5
+	task.spawn(function()
+		for _ = 1, 40 do
+			if not State.running then return end
+			if hotbarHolder() then
+				refreshHotbarCatalog()
+				return
+			end
+			task.wait(0.25)
+		end
+	end)
+end)
 
 supervise("npc catalog", 2, function()
 	local nextMobs, nextBosses = scanNpcCatalog()
@@ -754,28 +1133,44 @@ supervise("npc catalog", 2, function()
 	end
 end)
 
-supervise("hotbar catalog", 2, function()
-	local nextNames, nextSlots = scanHotbar()
-	if sameValues(weaponNames, nextNames) then return end
-	local selectedIndex = State.weaponSlot
-	weaponNames, weaponSlots = nextNames, nextSlots
-	local selectedLabel: string? = nil
-	if selectedIndex then
-		for label, index in weaponSlots do
-			if index == selectedIndex then selectedLabel = label; break end
+supervise("travel catalog", 5, function()
+	local nextAreaNames, nextAreaPositions, nextTargetNames, nextTargets = scanTravelCatalog()
+	areaPositions = nextAreaPositions
+	travelTargets = nextTargets
+	if not sameValues(areaNames, nextAreaNames) then
+		areaNames = nextAreaNames
+		if State.selectedArea and not areaPositions[State.selectedArea] then State.selectedArea = nil end
+		if areaDropdown then
+			areaDropdown:SetValues(areaNames)
+			if not State.selectedArea then areaDropdown:SetValue(nil) end
 		end
 	end
-	State.weaponSlot = if selectedLabel then selectedIndex else nil
-	if weaponDropdown then
-		weaponDropdown:SetValues(weaponNames)
-		weaponDropdown:SetValue(selectedLabel)
+	if not sameValues(travelTargetNames, nextTargetNames) then
+		travelTargetNames = nextTargetNames
+		if State.selectedTravelTarget and not travelTargets[State.selectedTravelTarget] then State.selectedTravelTarget = nil end
+		if travelTargetDropdown then
+			travelTargetDropdown:SetValues(travelTargetNames)
+			if not State.selectedTravelTarget then travelTargetDropdown:SetValue(nil) end
+		end
 	end
 end)
 
+supervise("hotbar catalog", 2, refreshHotbarCatalog)
+
 supervise("weapon equip", 0.75, function()
-	if State.weaponSlot and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then
-		ensureWeapon()
+	local active = live() and os.clock() >= equipReadyAt and hotbarHolder() ~= nil and State.weaponSlot ~= nil
+		and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel)
+	if active and State.weaponSlot then
+		if not weaponAutomationActive then
+			assumedWeaponSlot = nil
+			equipWeaponSlot(State.weaponSlot, true)
+		else
+			ensureWeapon()
+		end
+	elseif weaponAutomationActive then
+		assumedWeaponSlot = nil
 	end
+	weaponAutomationActive = active
 end)
 
 local function selectedChest(): Instance?
@@ -852,16 +1247,17 @@ local function patrolBoss()
 end
 
 local function attackCombo()
-	if State.manualTravel or not input or not live() or not activeTarget() or os.clock() < State.dodgingUntil then return end
+	if State.manualTravel or not refreshInputHandler() or not live() or not activeTarget()
+		or os.clock() < State.dodgingUntil or os.clock() < skillCastUntil then return end
 	local _, _, playerRoot = getCharacter()
 	local targetRoot = State.targetRoot
 	if not playerRoot or not targetRoot or (playerRoot.Position - targetRoot.Position).Magnitude > math.max(14, State.attackOffset + 9) then
 		return
 	end
-	ensureWeapon()
+	if not weaponReadyForCombat() then return end
 	for hit = 1, 5 do
 		if State.manualTravel or not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then break end
-		if os.clock() < State.dodgingUntil then break end
+		if os.clock() < State.dodgingUntil or os.clock() < skillCastUntil then break end
 		press("Combat", 0.05)
 		State.comboCount = readCombo()
 		if hit < 5 then task.wait(State.comboDelay) end
@@ -893,7 +1289,7 @@ supervise("target", 0.35, function()
 		local targetName = State.levelTarget
 		if targetName then
 			local isBossTarget = registeredBosses[targetName] == true or targetName:lower():find("boss", 1, true) ~= nil
-			local model, humanoid, root = nearestNpc(isBossTarget, targetName)
+			local model, humanoid, root = nearestNpc(isBossTarget, targetName, math.huge)
 			if model and humanoid and root then
 				State.travelDestination = nil
 				setTarget(model, humanoid, root)
@@ -934,8 +1330,9 @@ end)
 
 supervise("skills", 0.15, function()
 	if State.manualTravel then releaseHold(); return end
-	if not input or not live() then releaseHold(); return end
+	if not refreshInputHandler() or not live() then releaseHold(); return end
 	if not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then releaseHold(); return end
+	if not weaponReadyForCombat() then releaseHold(); return end
 	if State.holdSkill then
 		for key, action in heldActions do
 			if not State.holdSkillKeys[key] then
@@ -963,7 +1360,12 @@ supervise("skills", 0.15, function()
 		return
 	end
 	releaseHold()
-	if State.autoSkills and os.clock() - State.lastSkill > 1 then
+	if State.autoSkills and os.clock() >= State.dodgingUntil and os.clock() - State.lastSkill > 0.85 then
+		local _, _, playerRoot = getCharacter()
+		local targetRoot = State.targetRoot
+		if not playerRoot or not targetRoot or (playerRoot.Position - targetRoot.Position).Magnitude > math.max(22, State.attackOffset + 15) then
+			return
+		end
 		local keys = { "Z", "X", "C", "V", "B" }
 		for offset = 1, #keys do
 			local index = (skillCursor + offset - 1) % #keys + 1
@@ -973,7 +1375,9 @@ supervise("skills", 0.15, function()
 				if skillReady(name) then
 					State.lastSkill = os.clock()
 					skillCursor = index
-					press(action, 0.05)
+					skillCastUntil = os.clock() + 0.75
+					release("Combat")
+					press(action, 0.12)
 					break
 				end
 			end
@@ -1017,47 +1421,105 @@ local function field(instance: Instance?, keys: {string}): any
 	return nil
 end
 
+local lastKnownPlayerLevel: number? = nil
+
+local function parseLevelValue(raw: any): number?
+	if type(raw) == "number" then
+		return if raw >= 1 then math.floor(raw) else nil
+	end
+	if type(raw) ~= "string" then return nil end
+	local text = raw:gsub("<[^>]->", ""):gsub(",", ""):match("^%s*(.-)%s*$")
+	local number = tonumber(text)
+		or tonumber(text:match("^[Ll][Vv][Ll]?%.?%s*:?%s*(%d+)"))
+		or tonumber(text:match("^[Ll][Ee][Vv][Ee][Ll]%s*:?%s*(%d+)"))
+		or tonumber(text:match("^(%d+)%s*[Ll][Vv][Ll]?%.?$"))
+		or tonumber(text:match("^(%d+)%s*[Ll][Ee][Vv][Ee][Ll]$"))
+	return if number and number >= 1 then math.floor(number) else nil
+end
+
+local function rememberPlayerLevel(level: number?): number?
+	if level then lastKnownPlayerLevel = level end
+	return level
+end
+
 local function currentLevel(): number?
 	local keys = { "Level", "Lvl", "PlayerLevel" }
-	local containers: {Instance} = { player }
+	if not characterInfo then
+		characterInfo = requirePath(ReplicatedStorage, { "CAM", "Global", "Character_info_provider" })
+	end
+	if characterInfo then
+		for _, name in { "Get_level", "get_level", "GetLevel", "getLevel", "Get_player_level", "get_player_level" } do
+			local getter = characterInfo[name]
+			if type(getter) == "function" then
+				local ok, raw = pcall(getter, player)
+				if not ok then ok, raw = pcall(getter, characterInfo, player) end
+				local provided = if ok then parseLevelValue(raw) else nil
+				if ok and not provided and type(raw) == "table" then
+					provided = parseLevelValue(raw.Level or raw.Lvl or raw.PlayerLevel or raw.CombatLevel)
+				end
+				if provided then return rememberPlayerLevel(provided) end
+			end
+		end
+	end
+	local direct = field(player, keys)
+	local level = parseLevelValue(direct)
+	if level then return rememberPlayerLevel(level) end
+
+	local containers: {Instance} = {}
 	local stats = player:FindFirstChild("leaderstats")
 	local data = player:FindFirstChild("Data") or player:FindFirstChild("PlayerData")
 	if stats then table.insert(containers, stats) end
-	if data then
-		table.insert(containers, data)
-		local nestedStats = data:FindFirstChild("Stats")
-		if nestedStats then table.insert(containers, nestedStats) end
-	end
+	if data then table.insert(containers, data) end
 	if player.Character then table.insert(containers, player.Character) end
 	for _, container in containers do
 		local raw = field(container, keys)
-		local level: number? = tonumber(raw)
-		if not level and type(raw) == "string" then level = tonumber(raw:match("^[Ll][Vv]%s*(%d+)$")) end
-		if level then return level end
+		level = parseLevelValue(raw)
+		if not level then level = parseLevelValue(field(container, { "CombatLevel" })) end
+		if level then return rememberPlayerLevel(level) end
+		for _, descendant in container:GetDescendants() do
+			local name = descendant.Name:lower()
+			if name == "level" or name == "lvl" or name == "playerlevel" or name == "combatlevel" then
+				if descendant:IsA("ValueBase") then level = parseLevelValue((descendant :: any).Value) end
+				if not level then level = parseLevelValue(field(descendant, keys)) end
+				if level then return rememberPlayerLevel(level) end
+			end
+		end
 	end
+
 	local gui = player:FindFirstChild("PlayerGui")
 	if gui then
 		local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
-		local hudLevels: {[number]: boolean} = {}
+		local bestLevel: number? = nil
+		local bestScore = -1
 		for _, child in gui:GetDescendants() do
-			if child:IsA("TextLabel") and child.Visible then
+			if (child:IsA("TextLabel") or child:IsA("TextButton")) and child.Visible then
 				local path = child:GetFullName():lower()
-				if not path:find("mastery", 1, true) and not child.Text:lower():find("mastery", 1, true) then
-					local level = tonumber(child.Text:match("^%s*[Ll][Vv]%s*%.?%s*(%d+)"))
-					local position = child.AbsolutePosition
-					local inPlayerHud = viewport and position.X < viewport.X * 0.4 and position.Y > viewport.Y * 0.55
-					if level and inPlayerHud then hudLevels[level] = true end
+				local text = child.Text:gsub("<[^>]->", "")
+				local excluded = path:find("mastery", 1, true) or path:find("combat", 1, true)
+					or path:find("dialog", 1, true) or path:find("conversation", 1, true)
+					or path:find("quest", 1, true) or path:find("lukiho", 1, true)
+				if not excluded and not text:lower():find("mastery", 1, true) then
+					level = parseLevelValue(text)
+					if not level and (child.Name:lower():find("level", 1, true) or path:find(".level", 1, true)) then
+						level = tonumber(text:match("%d+"))
+					end
+					if level then
+						local score = 0
+						local name = child.Name:lower()
+						if name:find("level", 1, true) or name == "lvl" then score += 5 end
+						if text:match("^%s*[Ll][Vv][Ll]?") or text:match("^%s*[Ll][Ee][Vv][Ee][Ll]") then score += 4 end
+						if path:find("hud", 1, true) or path:find("stat", 1, true) or path:find("profile", 1, true) then score += 3 end
+						if viewport and child.AbsolutePosition.X < viewport.X * 0.5 then score += 1 end
+						if score > bestScore or (score == bestScore and (not bestLevel or level > bestLevel)) then
+							bestLevel, bestScore = level, score
+						end
+					end
 				end
 			end
 		end
-		local only: number? = nil
-		for value in hudLevels do
-			if only then return nil end
-			only = value
-		end
-		return only
+		if bestLevel and bestScore >= 4 then return rememberPlayerLevel(bestLevel) end
 	end
-	return nil
+	return lastKnownPlayerLevel
 end
 
 local QUEST_TARGET_KEYS = { "QuestTarget", "TargetMob", "RequiredMob", "EnemyName", "MobName" }
@@ -1072,8 +1534,16 @@ local function hudQuestProgress(): (string?, boolean?)
 			local target, current, required = text:match("^(.-)%s+[Dd]efeated%s+(%d+)%s*/%s*(%d+)")
 			if not target then target, current, required = text:match("^[Dd]efeat%s+(.-)%s+(%d+)%s*/%s*(%d+)") end
 			if not target then target, current, required = text:match("^[Kk]ill%s+(.-)%s+(%d+)%s*/%s*(%d+)") end
+			if not target then current, required, target = text:match("^(%d+)%s*/%s*(%d+)%s+(.+)%s+[Dd]efeated") end
+			if not target then target, current, required = text:match("^(.-)%s*:%s*(%d+)%s*/%s*(%d+)") end
 			if target and current and required then
 				return target:match("^%s*(.-)%s*$"), tonumber(current) >= tonumber(required)
+			end
+			local path = child:GetFullName():lower()
+			local lower = text:lower()
+			if (path:find("quest", 1, true) or path:find("objective", 1, true))
+				and (lower:find("quest complete", 1, true) or lower:find("quest completed", 1, true)) then
+				return nil, true
 			end
 		end
 	end
@@ -1110,36 +1580,104 @@ local function questComplete(): boolean
 end
 
 type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number, Target: string?, Dialogue: boolean, Confidence: number }
+type QuestOption = { Text: string, Target: string, Level: number }
+type SelectedQuest = { Entry: QuestEntry, Option: QuestOption }
 local rejectedQuestGivers: {[Instance]: number} = {}
-local function bestQuest(level: number): QuestEntry?
+local questDialogueCatalog: {[Instance]: {QuestOption}} = {}
+local scannedQuestGivers: {[Instance]: boolean} = {}
+
+local function questGivers(): {QuestEntry}
 	local _, _, root = getCharacter()
-	if not root then return nil end
-	local best: QuestEntry? = nil
-	local bestDistance = math.huge
+	if not root then return {} end
+	local byGiver: {[Instance]: QuestEntry} = {}
 	for prompt in trackedPrompts do
 		if prompt.Parent and prompt.Enabled then
 			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
-			if (rejectedQuestGivers[giver] or 0) > os.clock() then continue end
 			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
 			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
 			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
+			local npcModel: Model? = if giver:IsA("Model") then giver else giver:FindFirstAncestorOfClass("Model") :: Model?
+			local interactiveNpc = npcModel ~= nil and Players:GetPlayerFromCharacter(npcModel) == nil
+				and npcModel:FindFirstChildOfClass("Humanoid") ~= nil
+				and (text:find("interact", 1, true) ~= nil or text:find("speak", 1, true) ~= nil
+					or text:find("conversation", 1, true) ~= nil)
 			local rawLevel = field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS)
-			local required = tonumber(rawLevel) or tonumber(tostring(rawLevel):match("%d+")) or 0
+			local required = parseLevelValue(rawLevel) or tonumber(tostring(rawLevel):match("%d+")) or 0
 			local target = field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS)
 			local dialogue = text:find("chat", 1, true) ~= nil or text:find("talk", 1, true) ~= nil
+				or interactiveNpc or ((tagged or questFolder ~= nil) and target == nil)
 			local structured = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true
 				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil
 			local questLike = structured or dialogue
-			if questLike and required <= level then
+			if questLike then
 				local position = promptPosition(prompt)
 				if position then
-					local distance = (position - root.Position).Magnitude
 					local confidence = if structured then 2 else 1
-					if not best or confidence > best.Confidence or (confidence == best.Confidence and required > best.Level)
-						or (confidence == best.Confidence and required == best.Level and distance < bestDistance) then
-						best = { Prompt = prompt, Giver = giver, Position = position, Level = required,
+					local current = byGiver[giver]
+					if not current or confidence > current.Confidence or (confidence == current.Confidence and required > current.Level) then
+						byGiver[giver] = { Prompt = prompt, Giver = giver, Position = position, Level = required,
 							Target = if type(target) == "string" and target ~= "" then target else nil,
 							Dialogue = dialogue, Confidence = confidence }
+					end
+				end
+			end
+		end
+	end
+	local entries: {QuestEntry} = {}
+	for _, entry in byGiver do table.insert(entries, entry) end
+	table.sort(entries, function(left, right)
+		return (left.Position - root.Position).Magnitude < (right.Position - root.Position).Magnitude
+	end)
+	return entries
+end
+
+local function mergeQuestOption(giver: Instance, option: QuestOption)
+	local options = questDialogueCatalog[giver]
+	if not options then
+		options = {}
+		questDialogueCatalog[giver] = options
+	end
+	for index, existing in options do
+		if existing.Level == option.Level and canonicalName(existing.Target) == canonicalName(option.Target) then
+			options[index] = option
+			return
+		end
+	end
+	table.insert(options, option)
+end
+
+local function refreshStructuredQuests(entries: {QuestEntry})
+	for _, entry in entries do
+		if entry.Level > 0 and entry.Target then
+			mergeQuestOption(entry.Giver, { Text = entry.Target, Target = entry.Target, Level = entry.Level })
+		end
+		if not entry.Dialogue then scannedQuestGivers[entry.Giver] = true end
+	end
+end
+
+local function nextQuestGiverToScan(entries: {QuestEntry}): QuestEntry?
+	for _, entry in entries do
+		if entry.Dialogue and not scannedQuestGivers[entry.Giver]
+			and (rejectedQuestGivers[entry.Giver] or 0) <= os.clock() then
+			return entry
+		end
+	end
+	return nil
+end
+
+local function bestCatalogQuest(entries: {QuestEntry}, level: number): SelectedQuest?
+	local _, _, root = getCharacter()
+	if not root then return nil end
+	local best: SelectedQuest? = nil
+	local bestDistance = math.huge
+	for _, entry in entries do
+		if (rejectedQuestGivers[entry.Giver] or 0) <= os.clock() then
+			for _, option in questDialogueCatalog[entry.Giver] or {} do
+				if option.Level > 0 and option.Level <= level then
+					local distance = (entry.Position - root.Position).Magnitude
+					if not best or option.Level > best.Option.Level
+						or (option.Level == best.Option.Level and distance < bestDistance) then
+						best = { Entry = entry, Option = option }
 						bestDistance = distance
 					end
 				end
@@ -1169,21 +1707,21 @@ local function buttonText(button: GuiButton): string
 	return longest
 end
 
-local function parseDialogueChoice(button: GuiButton, level: number): DialogueChoice?
+local function parseDialogueChoice(button: GuiButton): DialogueChoice?
 	local text = buttonText(button):gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
 	if text == "" then return nil end
 	local lower = text:lower()
 	if lower == "close" or lower == "cancel" or lower == "leave" or lower == "goodbye" then return nil end
 	local questLike = lower:find("take", 1, true) or lower:find("defeat", 1, true)
 		or lower:find("kill", 1, true) or lower:find("hunt", 1, true) or lower:find("slay", 1, true)
-	local required = tonumber(lower:match("lv%s*%.?%s*(%d+)") or lower:match("level%s*(%d+)")) or 0
-	if not questLike and required == 0 then return nil end
-	if required > level then return nil end
-	local target = lower:gsub("%b()", ""):match("^%s*(.-)%s*$")
+	if not questLike then return nil end
+	local required = tonumber(lower:match("lvl?%s*%.?%s*:?%s*(%d+)") or lower:match("level%s*:?%s*(%d+)")) or 0
+	local target = lower:gsub("%b()", ""):gsub("%b[]", ""):match("^%s*(.-)%s*$")
 	for _, prefix in { "i'll take ", "ill take ", "i will take ", "accept ", "defeat ", "kill ", "hunt ", "slay " } do
 		if target:sub(1, #prefix) == prefix then target = target:sub(#prefix + 1); break end
 	end
-	target = target:gsub("^%d+%s+", ""):gsub("^the%s+", ""):gsub("[%.!]+$", ""):match("^%s*(.-)%s*$")
+	target = target:gsub("lvl?%s*%.?%s*:?%s*%d+", ""):gsub("level%s*:?%s*%d+", "")
+		:gsub("^%d+%s+", ""):gsub("^the%s+", ""):gsub("[%.!]+$", ""):match("^%s*(.-)%s*$")
 	if target == "" then return nil end
 	return { Button = button, Text = text, Target = target, Level = required }
 end
@@ -1197,10 +1735,10 @@ local function activateGuiButton(button: GuiButton): boolean
 	return pcall(function() (button :: any):Activate() end)
 end
 
-local function dialogueChoice(level: number): (DialogueChoice?, GuiButton?, boolean)
+local function dialogueChoices(): ({DialogueChoice}, GuiButton?, boolean)
 	local gui = player:FindFirstChild("PlayerGui")
-	if not gui then return nil, nil, false end
-	local best: DialogueChoice? = nil
+	if not gui then return {}, nil, false end
+	local choices: {DialogueChoice} = {}
 	local closeButton: GuiButton? = nil
 	local dialogueVisible = false
 	for _, child in gui:GetDescendants() do
@@ -1211,58 +1749,95 @@ local function dialogueChoice(level: number): (DialogueChoice?, GuiButton?, bool
 				closeButton = child
 				dialogueVisible = true
 			end
-			local choice = parseDialogueChoice(child, level)
+			local choice = parseDialogueChoice(child)
 			if choice then
 				dialogueVisible = true
-				if not best or choice.Level > best.Level or (choice.Level == best.Level
-					and choice.Target:find("boss", 1, true) ~= nil and best.Target:find("boss", 1, true) == nil) then
-					best = choice
-				end
+				table.insert(choices, choice)
 			end
 		end
 	end
-	return best, closeButton, dialogueVisible
+	return choices, closeButton, dialogueVisible
 end
 
 local pendingQuest: QuestEntry? = nil
+local pendingDialogueMode = ""
+local pendingQuestOption: QuestOption? = nil
 local dialogueDeadline = 0
 
 local function inspectQuestData()
 	print("[Lukiho] Level:", currentLevel(), "Active target:", activeQuestTarget(), "Complete:", questComplete())
 	local count = 0
-	for prompt in trackedPrompts do
-		if prompt.Parent then
-			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
-			local text = (giver.Name .. " " .. prompt.ActionText .. " " .. prompt.ObjectText):lower()
-			if text:find("quest", 1, true) or text:find("talk", 1, true) or text:find("chat", 1, true)
-				or CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver") then
-				count += 1
-				print("[Lukiho] Quest NPC:", giver:GetFullName(), "Action:", prompt.ActionText,
-					"Required level:", field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS),
-					"Target:", field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS))
-				if count >= 30 then break end
-			end
+	local entries = questGivers()
+	refreshStructuredQuests(entries)
+	for _, entry in entries do
+		count += 1
+		local options = questDialogueCatalog[entry.Giver] or {}
+		print("[Lukiho] Quest NPC:", entry.Giver:GetFullName(), "Action:", entry.Prompt.ActionText,
+			"Scanned:", scannedQuestGivers[entry.Giver] == true, "Cached choices:", #options,
+			"Structured level:", entry.Level, "Structured target:", entry.Target)
+		for _, option in options do
+			print("[Lukiho]   Choice:", option.Text, "Required level:", option.Level, "Target:", option.Target)
 		end
+		if count >= 30 then break end
 	end
-	local level = currentLevel() or 0
-	local choice, _, visible = dialogueChoice(level)
-	print("[Lukiho] Dialogue visible:", visible, "Eligible choice:", choice and choice.Text, "Parsed target:", choice and choice.Target)
+	local choices, _, visible = dialogueChoices()
+	print("[Lukiho] Dialogue visible:", visible, "Visible choices:", #choices)
+	for _, choice in choices do
+		print("[Lukiho]   Visible choice:", choice.Text, "Required level:", choice.Level, "Target:", choice.Target)
+	end
 	print("[Lukiho] Quest NPC entries shown:", count)
 end
 
 local questRetryAt = 0
 local wasQuestComplete = false
+local activeQuestSeen = false
 local function questStatus(message: string)
 	if State.questStatus == message then return end
 	State.questStatus = message
 	if questStatusLabel then questStatusLabel:SetText(message) end
 end
 
+local function clearPendingDialogue()
+	pendingQuest = nil
+	pendingDialogueMode = ""
+	pendingQuestOption = nil
+	dialogueDeadline = 0
+end
+
+local function sameQuestOption(choice: DialogueChoice, option: QuestOption): boolean
+	return choice.Level == option.Level and canonicalName(choice.Target) == canonicalName(option.Target)
+end
+
+local function catalogCounts(entries: {QuestEntry}): (number, number)
+	local scanned = 0
+	local quests = 0
+	for _, entry in entries do
+		if scannedQuestGivers[entry.Giver] then scanned += 1 end
+		quests += #(questDialogueCatalog[entry.Giver] or {})
+	end
+	return scanned, quests
+end
+
+local function resetQuestCatalog()
+	table.clear(questDialogueCatalog)
+	table.clear(scannedQuestGivers)
+	table.clear(rejectedQuestGivers)
+	clearPendingDialogue()
+	State.questGiver = nil
+	State.levelTarget = nil
+	State.travelDestination = nil
+	questRetryAt = 0
+	wasQuestComplete = false
+	activeQuestSeen = false
+	clearTarget()
+	questStatus("Quest catalog cleared; scan will restart")
+end
+
 supervise("auto level", 1, function()
 	if not State.autoLevel then
 		State.levelTarget = nil
 		State.questGiver = nil
-		pendingQuest = nil
+		clearPendingDialogue()
 		questStatus("Idle")
 		return
 	end
@@ -1276,35 +1851,66 @@ supervise("auto level", 1, function()
 		return
 	end
 	if pendingQuest then
-		local choice, closeButton, dialogueVisible = dialogueChoice(level)
-		if choice and activateGuiButton(choice.Button) then
-			State.levelTarget = choice.Target
-			State.questGiver = pendingQuest.Giver
-			questRetryAt = os.clock() + 45
-			pendingQuest = nil
-			State.travelDestination = nil
-			questStatus(string.format("Lv %d | Accepted: %s", level, choice.Text))
+		local choices, closeButton, dialogueVisible = dialogueChoices()
+		if pendingDialogueMode == "Scan" and #choices > 0 then
+			local found = 0
+			for _, choice in choices do
+				if choice.Level > 0 then
+					mergeQuestOption(pendingQuest.Giver, {
+						Text = choice.Text,
+						Target = choice.Target,
+						Level = choice.Level,
+					})
+					found += 1
+				end
+			end
+			scannedQuestGivers[pendingQuest.Giver] = true
+			local giverName = pendingQuest.Giver.Name
+			if closeButton then activateGuiButton(closeButton) end
+			clearPendingDialogue()
+			questRetryAt = os.clock() + 0.5
+			questStatus(string.format("Lv %d | Scanned %s: %d leveled quest(s)", level, giverName, found))
 			return
+		elseif pendingDialogueMode == "Accept" and pendingQuestOption then
+			for _, choice in choices do
+				if sameQuestOption(choice, pendingQuestOption) and activateGuiButton(choice.Button) then
+					local accepted = pendingQuestOption
+					State.levelTarget = accepted.Target
+					State.questGiver = pendingQuest.Giver
+					questRetryAt = os.clock() + 45
+					wasQuestComplete = false
+					activeQuestSeen = false
+					State.travelDestination = nil
+					clearPendingDialogue()
+					questStatus(string.format("Lv %d | Accepted quest Lv %d: %s", level, accepted.Level, accepted.Target))
+					return
+				end
+			end
 		end
 		if os.clock() >= dialogueDeadline then
 			if dialogueVisible and closeButton then activateGuiButton(closeButton) end
-			rejectedQuestGivers[pendingQuest.Giver] = os.clock() + 60
-			questStatus(string.format("Lv %d | No eligible quest from %s", level, pendingQuest.Giver.Name))
-			pendingQuest = nil
+			local giver = pendingQuest.Giver
+			local mode = pendingDialogueMode
+			if mode == "Scan" then
+				scannedQuestGivers[giver] = true
+			else
+				rejectedQuestGivers[giver] = os.clock() + 30
+			end
+			clearPendingDialogue()
 			questRetryAt = 0
+			questStatus(string.format("Lv %d | %s failed for %s", level, mode, giver.Name))
 			return
 		end
-		questStatus(string.format("Lv %d | Reading %s's dialogue", level, pendingQuest.Giver.Name))
+		questStatus(string.format("Lv %d | %s %s's dialogue", level, pendingDialogueMode, pendingQuest.Giver.Name))
 		return
 	end
-	local quest = bestQuest(level)
 	local active = activeQuestTarget()
 	local completed = questComplete()
 	local justCompleted = completed and not wasQuestComplete
 	wasQuestComplete = completed
 	if completed then
 		State.levelTarget = nil
-		pendingQuest = nil
+		activeQuestSeen = false
 		if justCompleted then questRetryAt = 0 end
 		clearTarget()
 	elseif active then
@@ -1313,38 +1919,77 @@ supervise("auto level", 1, function()
 			State.travelDestination = nil
 		end
 		State.levelTarget = active
+		activeQuestSeen = true
 		questStatus(string.format("Lv %d | Target: %s", level, active))
 		return
+	elseif State.levelTarget and activeQuestSeen then
+		State.levelTarget = nil
+		activeQuestSeen = false
+		questRetryAt = 0
+		clearTarget()
 	elseif State.levelTarget and os.clock() < questRetryAt then
 		questStatus(string.format("Lv %d | Quest requested: %s", level, State.levelTarget))
 		return
 	else
 		if State.levelTarget then clearTarget() end
 		State.levelTarget = nil
+		activeQuestSeen = false
 	end
-	if not quest then
-		State.travelDestination = nil
-		questStatus(string.format("Lv %d | No quest giver in client data", level))
+
+	local entries = questGivers()
+	refreshStructuredQuests(entries)
+	local toScan = nextQuestGiverToScan(entries)
+	if toScan then
+		State.questGiver = toScan.Giver
+		local _, _, root = getCharacter()
+		if not root then return end
+		local distance = (root.Position - toScan.Position).Magnitude
+		if distance > math.min(8, math.max(1, toScan.Prompt.MaxActivationDistance - 1)) then
+			State.travelDestination = toScan.Position + Vector3.new(0, 2, 0)
+			questStatus(string.format("Lv %d | Scanning quest NPC: %s", level, toScan.Giver.Name))
+		elseif os.clock() >= questRetryAt and usePrompt(toScan.Prompt, 8) then
+			State.travelDestination = nil
+			pendingQuest = toScan
+			pendingDialogueMode = "Scan"
+			pendingQuestOption = nil
+			dialogueDeadline = os.clock() + 7
+			questRetryAt = os.clock() + 1
+			questStatus(string.format("Lv %d | Opening %s for scan", level, toScan.Giver.Name))
+		end
 		return
 	end
+
+	local selected = bestCatalogQuest(entries, level)
+	if not selected then
+		State.travelDestination = nil
+		local scanned, quests = catalogCounts(entries)
+		questStatus(string.format("Lv %d | Scanned %d NPC(s), no eligible leveled kill quest (%d found)", level, scanned, quests))
+		return
+	end
+	local quest = selected.Entry
+	local option = selected.Option
 	State.questGiver = quest.Giver
 	local _, _, root = getCharacter()
 	if not root then return end
 	local distance = (root.Position - quest.Position).Magnitude
 	if distance > math.min(8, math.max(1, quest.Prompt.MaxActivationDistance - 1)) then
 		State.travelDestination = quest.Position + Vector3.new(0, 2, 0)
-		questStatus(string.format("Lv %d | Traveling to %s", level, quest.Giver.Name))
+		questStatus(string.format("Lv %d | Quest Lv %d: traveling to %s", level, option.Level, quest.Giver.Name))
 	elseif os.clock() >= questRetryAt then
 		if usePrompt(quest.Prompt, 8) then
 			State.travelDestination = nil
 			if quest.Dialogue then
 				pendingQuest = quest
+				pendingDialogueMode = "Accept"
+				pendingQuestOption = option
 				dialogueDeadline = os.clock() + 6
-				questStatus(string.format("Lv %d | Opening %s", level, quest.Giver.Name))
+				questRetryAt = os.clock() + 1
+				questStatus(string.format("Lv %d | Selecting quest Lv %d from %s", level, option.Level, quest.Giver.Name))
 			else
 				questRetryAt = os.clock() + 20
-				State.levelTarget = quest.Target
-				questStatus(if quest.Target then "Quest requested: " .. quest.Target else "Quest requested; waiting for target data")
+				State.levelTarget = option.Target
+				activeQuestSeen = false
+				questStatus(string.format("Lv %d | Requested quest Lv %d: %s", level, option.Level, option.Target))
 			end
 		end
 	end
@@ -1703,6 +2348,7 @@ local function polishSliderTypography(screenGui: ScreenGui)
 end
 
 mobNames, bossNames = scanNpcCatalog()
+areaNames, areaPositions, travelTargetNames, travelTargets = scanTravelCatalog()
 weaponNames, weaponSlots = scanHotbar()
 
 local loaded, failure = xpcall(function()
@@ -1791,6 +2437,7 @@ local loaded, failure = xpcall(function()
 		end
 	end })
 	questStatusLabel = leveling:AddLabel("Idle")
+	leveling:AddButton({ Text = "Rescan Quest NPCs", Tooltip = "Clear learned conversations and scan every detected quest NPC again.", Func = resetQuestCatalog })
 	leveling:AddButton({ Text = "Inspect Quest", Tooltip = "Print quest NPC metadata to the developer console.", Func = inspectQuestData })
 	local combat = tabs.Combat:AddGroupbox({ Side = "Left", Name = "Loadout", IconName = "swords" })
 	weaponDropdown = combat:AddDropdown("LukihoWeapon", {
@@ -1799,7 +2446,11 @@ local loaded, failure = xpcall(function()
 		AllowNull = true,
 		Searchable = true,
 		Callback = function(value: string?)
-			State.weaponSlot = if value then weaponSlots[value] else nil
+			if updatingWeaponDropdown then return end
+			local nextSlot = if value then weaponSlots[value] or tonumber(value:match("^%s*(%d+)")) else nil
+			if State.weaponSlot == nextSlot then return end
+			State.weaponSlot = nextSlot
+			assumedWeaponSlot = nil
 			if State.weaponSlot then
 				task.spawn(equipWeaponSlot, State.weaponSlot, true)
 			end
@@ -1843,6 +2494,24 @@ local loaded, failure = xpcall(function()
 	movement:AddSlider("LukihoFlySpeed", { Text = "Fly Speed", Min = 10, Max = 450, Default = 80, Rounding = 0, Callback = function(value: number) State.flySpeed = value end })
 	local clip = movement:AddToggle("LukihoClip", { Text = "NoClip", Default = false, Callback = function(value: boolean) State.noclip = value end })
 	clip:AddKeyPicker("LukihoClipKey", { Text = "NoClip", Default = "N", SyncToggleState = true })
+	local travel = tabs.Movement:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "Map Travel", IconName = "map-pin" })
+	areaDropdown = travel:AddDropdown("LukihoAreaTravel", {
+		Text = "Select Area",
+		Values = areaNames,
+		AllowNull = true,
+		Searchable = true,
+		Callback = function(value: string?) State.selectedArea = if value and areaPositions[value] then value else nil end,
+	})
+	travel:AddButton({ Text = "Go to Area", Tooltip = "Travel to the selected area with temporary noclip.", Func = travelToArea })
+	travelTargetDropdown = travel:AddDropdown("LukihoTargetTravel", {
+		Text = "Select NPC / Mob",
+		Values = travelTargetNames,
+		AllowNull = true,
+		Searchable = true,
+		Callback = function(value: string?) State.selectedTravelTarget = if value and travelTargets[value] then value else nil end,
+	})
+	travel:AddButton({ Text = "Go to NPC / Mob", Tooltip = "Travel across the full map to the selected NPC, mob, or boss.", Func = travelToCatalogTarget })
+	travel:AddButton({ Text = "Stop Travel", Func = cancelManualTravel })
 	local speed = tabs.Movement:AddGroupbox({ Side = compactLayout and "Left" or "Right", Name = "Speed & Jump", IconName = "zap" })
 	speed:AddToggle("LukihoSpeed", { Text = "Custom Walk Speed", Default = false, Callback = function(value: boolean) State.speed = value end })
 	speed:AddSlider("LukihoSpeedValue", { Text = "Walk Speed", Min = 16, Max = 200, Default = 32, Rounding = 0, Callback = function(value: number) State.speedValue = value end })
