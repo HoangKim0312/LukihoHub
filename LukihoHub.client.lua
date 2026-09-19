@@ -1606,12 +1606,114 @@ local function questComplete(): boolean
 	return completed == true
 end
 
-type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number, Target: string?, Dialogue: boolean, Confidence: number }
 type QuestOption = { Text: string, Target: string, Level: number }
+type QuestChoiceHint = { Key: string, Position: Vector3, Option: QuestOption, Owner: string? }
+type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number,
+	Target: string?, Dialogue: boolean, Confidence: number, Hints: {QuestOption} }
 type SelectedQuest = { Entry: QuestEntry, Option: QuestOption }
 local rejectedQuestGivers: {[Instance]: number} = {}
 local questDialogueCatalog: {[Instance]: {QuestOption}} = {}
 local scannedQuestGivers: {[Instance]: boolean} = {}
+local questChoiceHints: {QuestChoiceHint} = {}
+local questHintsRefreshedAt = 0
+
+local function parseQuestOptionText(rawText: string): QuestOption?
+	local text = rawText:gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+	if text == "" then return nil end
+	local lower = text:lower()
+	local required = tonumber(lower:match("lvl?%s*%.?%s*:?%s*(%d+)") or lower:match("level%s*:?%s*(%d+)"))
+	if not required or required <= 0 then return nil end
+	local target = lower:gsub("%b()", ""):gsub("%b[]", ""):match("^%s*(.-)%s*$")
+	for _, prefix in { "i'll ", "ill ", "i will " } do
+		if target:sub(1, #prefix) == prefix then target = target:sub(#prefix + 1); break end
+	end
+	local combat = false
+	for _, prefix in { "accept ", "clear out ", "deal with ", "defeat ", "destroy ", "drive back ", "drive ",
+		"eliminate ", "exterminate ", "fell ", "hunt ", "kill ", "put out ", "slay ", "take ", "wipe out " } do
+		if target:sub(1, #prefix) == prefix then
+			target = target:sub(#prefix + 1)
+			combat = true
+			break
+		end
+	end
+	if not combat then return nil end
+	target = target:gsub("lvl?%s*%.?%s*:?%s*%d+", ""):gsub("level%s*:?%s*%d+", "")
+		:gsub("^%d+%s+", ""):gsub("^the%s+", ""):gsub("%s+back$", "")
+		:gsub("[%.!]+$", ""):match("^%s*(.-)%s*$")
+	if target == "" then return nil end
+	return { Text = text, Target = target, Level = required }
+end
+
+local function refreshQuestChoiceHints(): {QuestChoiceHint}
+	if questHintsRefreshedAt > 0 and os.clock() - questHintsRefreshedAt < 10 then return questChoiceHints end
+	questHintsRefreshedAt = os.clock()
+	if not regions then regions = requirePath(ReplicatedStorage, { "Regions" }) end
+	if type(regions) ~= "table" then return questChoiceHints end
+	local nextHints: {QuestChoiceHint} = {}
+	local seen: {[string]: boolean} = {}
+	local visited: {[any]: boolean} = {}
+	local function add(rawText: any, position: Vector3?, owner: string?)
+		if type(rawText) ~= "string" or not position then return end
+		local option = parseQuestOptionText(rawText)
+		if not option then return end
+		local key = string.format("%s@%s@%d,%d,%d", option.Text:lower(), (owner or ""):lower(),
+			math.round(position.X), math.round(position.Y), math.round(position.Z))
+		if seen[key] then return end
+		seen[key] = true
+		table.insert(nextHints, { Key = key, Position = position, Option = option, Owner = owner })
+	end
+	local function childOwner(key: any, current: string?): string?
+		if type(key) ~= "string" or parseQuestOptionText(key) then return current end
+		local lower = key:lower()
+		if table.find({ "text", "name", "title", "label", "choice", "response", "position", "cframe",
+			"location", "spawn", "point", "center", "coordinates", "coords" }, lower) then return current end
+		for _, word in AREA_DATA_BLOCK_WORDS do
+			if lower:find(word, 1, true) then return current end
+		end
+		for _, name in AREA_MODULE_KEYS do
+			if lower == name:lower() then return current end
+		end
+		if lower == "npcspawns" or lower == "spawns" then return current end
+		return if #key <= 60 then key else current
+	end
+	local function walk(node: any, depth: number, inheritedPosition: Vector3?, inheritedOwner: string?)
+		if type(node) ~= "table" or visited[node] or depth > 7 then return end
+		visited[node] = true
+		local nodePosition = tablePosition(node) or inheritedPosition
+		local explicitOwner = node.GiverName or node.NPCName or node.NpcName or node.Npc
+		local nodeName = node.Name
+		if not explicitOwner and type(nodeName) == "string" and not parseQuestOptionText(nodeName) then explicitOwner = nodeName end
+		local nodeOwner = if type(explicitOwner) == "string" and explicitOwner ~= "" then explicitOwner else inheritedOwner
+		for key, value in node do
+			local position = tablePosition(value) or nodePosition
+			add(key, position, nodeOwner)
+			if type(value) == "table" then
+				for _, textKey in { "Text", "Name", "Title", "Label", "Choice", "Response" } do
+					add(value[textKey], position, nodeOwner)
+				end
+				walk(value, depth + 1, position, childOwner(key, nodeOwner))
+			end
+		end
+	end
+	walk(regions, 0, nil, nil)
+	questChoiceHints = nextHints
+	return questChoiceHints
+end
+
+local function questHintsForGiver(giver: Instance): {QuestOption}
+	local options: {QuestOption} = {}
+	local attributedName = giver:GetAttribute("DisplayName") or giver:GetAttribute("NPCName")
+	local giverName = if type(attributedName) == "string" and attributedName ~= "" then attributedName else giver.Name
+	local giverKey = canonicalName(giverName)
+	for _, hint in refreshQuestChoiceHints() do
+		local ownerMatch = hint.Owner ~= nil and nameMatches(giverName, hint.Owner)
+		local targetKey = canonicalName(hint.Option.Target)
+		local mitsuFallback = giverKey == "demonslayermitsu" and hint.Option.Level >= 105 and hint.Option.Level <= 145
+			and (targetKey:find("frost", 1, true) ~= nil or targetKey:find("blaze", 1, true) ~= nil)
+		if ownerMatch or mitsuFallback then table.insert(options, hint.Option) end
+	end
+	return options
+end
 
 local function questGivers(): {QuestEntry}
 	local _, _, root = getCharacter()
@@ -1620,6 +1722,9 @@ local function questGivers(): {QuestEntry}
 	for prompt in trackedPrompts do
 		if prompt.Parent and prompt.Enabled then
 			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+			local position = promptPosition(prompt)
+			if not position then continue end
+			local hints = questHintsForGiver(giver)
 			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
 			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
 			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
@@ -1633,20 +1738,20 @@ local function questGivers(): {QuestEntry}
 				or kind:find("gather", 1, true) ~= nil or kind:find("collect", 1, true) ~= nil
 				or kind:find("talk", 1, true) ~= nil or kind:find("escort", 1, true) ~= nil
 			local dialogue = text:find("chat", 1, true) ~= nil or text:find("talk", 1, true) ~= nil
-				or ((tagged or questFolder ~= nil) and target == nil)
+				or #hints > 0 or ((tagged or questFolder ~= nil) and target == nil)
 			local structured = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true
-				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil
-			local questLike = structured and (not explicitlyNonCombat or target ~= nil)
+				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil or #hints > 0
+			local questLike = structured and (not explicitlyNonCombat or target ~= nil or #hints > 0)
 			if questLike then
-				local position = promptPosition(prompt)
-				if position then
-					local confidence = if structured then 2 else 1
-					local current = byGiver[giver]
-					if not current or confidence > current.Confidence or (confidence == current.Confidence and required > current.Level) then
-						byGiver[giver] = { Prompt = prompt, Giver = giver, Position = position, Level = required,
-							Target = if type(target) == "string" and target ~= "" then target else nil,
-							Dialogue = dialogue, Confidence = confidence }
-					end
+				local hintLevel = 0
+				for _, hint in hints do hintLevel = math.max(hintLevel, hint.Level) end
+				local effectiveLevel = math.max(required, hintLevel)
+				local confidence = if #hints > 0 then 3 elseif structured then 2 else 1
+				local current = byGiver[giver]
+				if not current or confidence > current.Confidence or (confidence == current.Confidence and effectiveLevel > current.Level) then
+					byGiver[giver] = { Prompt = prompt, Giver = giver, Position = position, Level = effectiveLevel,
+						Target = if type(target) == "string" and target ~= "" then target else nil,
+						Dialogue = dialogue, Confidence = confidence, Hints = hints }
 				end
 			end
 		end
@@ -1679,7 +1784,8 @@ local function refreshStructuredQuests(entries: {QuestEntry})
 		if entry.Level > 0 and entry.Target then
 			mergeQuestOption(entry.Giver, { Text = entry.Target, Target = entry.Target, Level = entry.Level })
 		end
-		if not entry.Dialogue then scannedQuestGivers[entry.Giver] = true end
+		for _, hint in entry.Hints do mergeQuestOption(entry.Giver, hint) end
+		if not entry.Dialogue or #entry.Hints > 0 then scannedQuestGivers[entry.Giver] = true end
 	end
 end
 
@@ -1737,21 +1843,9 @@ end
 
 local function parseDialogueChoice(button: GuiButton): DialogueChoice?
 	local text = buttonText(button):gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
-	if text == "" then return nil end
-	local lower = text:lower()
-	if lower == "close" or lower == "cancel" or lower == "leave" or lower == "goodbye" then return nil end
-	local questLike = lower:find("take", 1, true) or lower:find("defeat", 1, true)
-		or lower:find("kill", 1, true) or lower:find("hunt", 1, true) or lower:find("slay", 1, true)
-	if not questLike then return nil end
-	local required = tonumber(lower:match("lvl?%s*%.?%s*:?%s*(%d+)") or lower:match("level%s*:?%s*(%d+)")) or 0
-	local target = lower:gsub("%b()", ""):gsub("%b[]", ""):match("^%s*(.-)%s*$")
-	for _, prefix in { "i'll take ", "ill take ", "i will take ", "accept ", "defeat ", "kill ", "hunt ", "slay " } do
-		if target:sub(1, #prefix) == prefix then target = target:sub(#prefix + 1); break end
-	end
-	target = target:gsub("lvl?%s*%.?%s*:?%s*%d+", ""):gsub("level%s*:?%s*%d+", "")
-		:gsub("^%d+%s+", ""):gsub("^the%s+", ""):gsub("[%.!]+$", ""):match("^%s*(.-)%s*$")
-	if target == "" then return nil end
-	return { Button = button, Text = text, Target = target, Level = required }
+	local option = parseQuestOptionText(text)
+	if not option then return nil end
+	return { Button = button, Text = option.Text, Target = option.Target, Level = option.Level }
 end
 
 local function activateGuiObject(object: GuiObject): boolean
@@ -1863,6 +1957,13 @@ local dialogueStepCount = 0
 
 local function inspectQuestData()
 	print("[Lukiho] Level:", currentLevel(), "Active target:", activeQuestTarget(), "Complete:", questComplete())
+	local hints = refreshQuestChoiceHints()
+	print("[Lukiho] Replicated combat quest hints:", #hints)
+	for index = 1, math.min(#hints, 30) do
+		local hint = hints[index]
+		print("[Lukiho]   Hint owner:", hint.Owner, "Choice:", hint.Option.Text,
+			"Level:", hint.Option.Level, "Target:", hint.Option.Target)
+	end
 	local count = 0
 	local entries = questGivers()
 	refreshStructuredQuests(entries)
@@ -1922,6 +2023,8 @@ local function resetQuestCatalog()
 	table.clear(questDialogueCatalog)
 	table.clear(scannedQuestGivers)
 	table.clear(rejectedQuestGivers)
+	table.clear(questChoiceHints)
+	questHintsRefreshedAt = 0
 	clearPendingDialogue()
 	State.questGiver = nil
 	State.levelTarget = nil

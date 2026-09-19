@@ -87,6 +87,12 @@ objectives such as `Bandits defeated 0/3` are used to track progress. NPCs, prom
 or conversations not replicated to the client cannot be inspected until the game
 streams them in.
 
+Combat choices replicated inside the Regions module are also indexed as quest hints.
+The scanner retains their parent giver name, level, target phrase, and target position,
+then matches them to a replicated prompt by giver name rather than treating the
+choice text as an area. This supports phrases such as `drive back`, `put out`,
+`clear out`, `deal with`, and `fell` in addition to the basic kill verbs.
+
 Hotbar names are cached per slot so a temporary empty toolbar during death/respawn
 does not replace `2 - Sickles` with `2`. Internal dropdown refreshes do not fire the
 equip callback. The selected slot index survives respawn and is equipped once after
