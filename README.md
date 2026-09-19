@@ -66,6 +66,9 @@ as level zero. A generic `Talk`, `Chat`, `Interact`, or Humanoid NPC is not enou
 enter this scan: the giver must also expose a quest tag, quest folder, quest attribute,
 quest prompt text, level, or target metadata. Explicit delivery, letter, gathering,
 collection, talk, and escort quest types are excluded unless they provide a mob target.
+Multi-page conversations are advanced through visible Next/Continue/Advance or
+dialogue-arrow controls, up to 20 steps per interaction, before choices are evaluated.
+Unrecognized choice buttons are not clicked automatically.
 After the scan, it selects the highest quest level not exceeding the
 player's current level, accepts that exact choice, derives the mob target, completes
 the objective, and returns to repeat it. Whenever a higher eligible quest becomes
