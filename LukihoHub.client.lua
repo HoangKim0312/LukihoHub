@@ -27,10 +27,17 @@ type StateType = {
 	autoChestFarm: boolean,
 	autoChest: boolean,
 	autoLoot: boolean,
+	autoLevel: boolean,
 	autoSkills: boolean,
 	holdSkill: boolean,
-	selectedSkill: string,
+	holdSkillKeys: {[string]: boolean},
 	selectedSkills: {[string]: boolean},
+	espEnabled: boolean,
+	espRadius: number,
+	espMobs: boolean,
+	espBosses: boolean,
+	espQuests: boolean,
+	espInteractables: boolean,
 	selectedMob: string?,
 	selectedBoss: string?,
 	selectedTier: string,
@@ -65,6 +72,10 @@ type StateType = {
 	postKillUntil: number,
 	travelDestination: Vector3?,
 	manualTravel: boolean,
+	levelTarget: string?,
+	questGiver: Instance?,
+	questStatus: string,
+	lootPrompt: ProximityPrompt?,
 }
 
 local State: StateType = {
@@ -74,10 +85,17 @@ local State: StateType = {
 	autoChestFarm = false,
 	autoChest = false,
 	autoLoot = false,
+	autoLevel = false,
 	autoSkills = false,
 	holdSkill = false,
-	selectedSkill = "Z",
-	selectedSkills = { Z = true, X = true, C = true, V = true, B = true },
+	holdSkillKeys = {},
+	selectedSkills = {},
+	espEnabled = false,
+	espRadius = 10000,
+	espMobs = true,
+	espBosses = true,
+	espQuests = true,
+	espInteractables = true,
 	selectedMob = nil,
 	selectedBoss = nil,
 	selectedTier = "All",
@@ -112,6 +130,10 @@ local State: StateType = {
 	postKillUntil = 0,
 	travelDestination = nil,
 	manualTravel = false,
+	levelTarget = nil,
+	questGiver = nil,
+	questStatus = "Idle",
+	lootPrompt = nil,
 }
 
 local connections: {Connection} = {}
@@ -120,7 +142,8 @@ local targetAnimationConnection: Connection? = nil
 local stoppedConnections: {Connection} = {}
 local flyVelocity: BodyVelocity? = nil
 local library: any = nil
-local heldAction: string? = nil
+local heldActions: {[string]: string} = {}
+local skillCursor = 0
 local lastEquip = 0
 local speedBaseline: {[Humanoid]: number} = {}
 local mobDropdown: any = nil
@@ -135,12 +158,24 @@ local observedBosses: {[string]: boolean} = {}
 local registeredBosses: {[string]: boolean} = {}
 local bossSpawnPositions: {[string]: Vector3} = {}
 local npcSpawnPositions: {[string]: Vector3} = {}
+local questStatusLabel: any = nil
+local trackedPrompts: {[ProximityPrompt]: boolean} = {}
 
 local function connect(signal: RBXScriptSignal, callback: (...any) -> ()): Connection
 	local connection = signal:Connect(callback)
 	table.insert(connections, connection)
 	return connection
 end
+
+for _, instance in Workspace:GetDescendants() do
+	if instance:IsA("ProximityPrompt") then trackedPrompts[instance] = true end
+end
+connect(Workspace.DescendantAdded, function(instance)
+	if instance:IsA("ProximityPrompt") then trackedPrompts[instance] = true end
+end)
+connect(Workspace.DescendantRemoving, function(instance)
+	if instance:IsA("ProximityPrompt") then trackedPrompts[instance] = nil end
+end)
 
 local function getCharacter(): (Model?, Humanoid?, BasePart?)
 	local character = player.Character
@@ -208,12 +243,14 @@ end
 local function skillReady(skillName: string?): boolean
 	local character = player.Character
 	local status = character and character:FindFirstChild("SHC")
-	return skillName == nil or status == nil or status:FindFirstChild(skillName) == nil
+	return skillName ~= nil and status ~= nil and status:FindFirstChild(skillName) == nil
 end
 
 local function releaseHold()
-	if heldAction then release(heldAction) end
-	heldAction = nil
+	for key, action in heldActions do
+		release(action)
+		heldActions[key] = nil
+	end
 end
 
 local attackIds: {[string]: boolean} = {}
@@ -441,8 +478,8 @@ local function scanNpcCatalog(): ({string}, {string})
 	return nextMobs, nextBosses
 end
 
-local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
-	local selected = if bossOnly then State.selectedBoss else State.selectedMob
+local function nearestNpc(bossOnly: boolean, targetName: string?): (Model?, Humanoid?, BasePart?)
+	local selected = targetName or (if bossOnly then State.selectedBoss else State.selectedMob)
 	if not selected then return nil, nil, nil end
 	local _, _, playerRoot = getCharacter()
 	if not playerRoot then return nil, nil, nil end
@@ -788,7 +825,7 @@ local function attackCombo()
 	end
 	ensureWeapon()
 	for hit = 1, 5 do
-		if State.manualTravel or not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then break end
+		if State.manualTravel or not State.running or not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then break end
 		if os.clock() < State.dodgingUntil then break end
 		press("Combat", 0.05)
 		State.comboCount = readCombo()
@@ -798,10 +835,10 @@ local function attackCombo()
 end
 
 supervise("target", 0.35, function()
-	if not live() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.manualTravel) then
+	if not live() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel or State.manualTravel) then
 		clearTarget()
 		State.chestTarget = nil
-		State.travelDestination = nil
+		if not State.lootPrompt then State.travelDestination = nil end
 		State.manualTravel = false
 		return
 	end
@@ -817,6 +854,23 @@ supervise("target", 0.35, function()
 	end
 	clearTarget()
 	if not State.autoChestFarm and os.clock() < State.postKillUntil then return end
+	if State.autoLevel then
+		local targetName = State.levelTarget
+		if targetName then
+			local isBossTarget = registeredBosses[targetName] == true
+			local model, humanoid, root = nearestNpc(isBossTarget, targetName)
+			if model and humanoid and root then
+				State.travelDestination = nil
+				setTarget(model, humanoid, root)
+			else
+				local position = if isBossTarget then bossSpawnPositions[targetName] else npcSpawnPositions[targetName]
+				if position and not State.travelDestination then
+					State.travelDestination = position + Vector3.new(0, 5, 0)
+				end
+			end
+		end
+		return
+	end
 	if State.autoChestFarm then
 		local chest = selectedChest()
 		State.chestTarget = chest
@@ -838,7 +892,7 @@ supervise("target", 0.35, function()
 end)
 
 supervise("combat", 0.12, function()
-	if not State.manualTravel and not State.holdSkill and (State.autoFarm or State.autoBoss or State.autoChestFarm) then
+	if not State.manualTravel and not State.holdSkill and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then
 		attackCombo()
 	end
 end)
@@ -846,27 +900,44 @@ end)
 supervise("skills", 0.15, function()
 	if State.manualTravel then releaseHold(); return end
 	if not input or not live() then releaseHold(); return end
-	if not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm) then releaseHold(); return end
+	if not activeTarget() or not (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel) then releaseHold(); return end
 	if State.holdSkill then
-		local action, name = skillAction(State.selectedSkill)
-		if heldAction ~= action then releaseHold() end
-		if heldAction and type(input.IsDown) == "function" then
-			local ok, down = pcall(input.IsDown, action)
-			if ok and not down then heldAction = nil end
+		for key, action in heldActions do
+			if not State.holdSkillKeys[key] then
+				release(action)
+				heldActions[key] = nil
+			end
 		end
-		if not heldAction and skillReady(name) then
-			local ok = pcall(function() input.VirtualPress(action) end)
-			if ok then heldAction = action end
+		for _, key in { "Z", "X", "C", "V", "B" } do
+			if State.holdSkillKeys[key] then
+				local action, name = skillAction(key)
+				local held = heldActions[key]
+				if held and held ~= action then
+					release(held)
+					heldActions[key] = nil
+				elseif held and type(input.IsDown) == "function" then
+					local ok, down = pcall(input.IsDown, action)
+					if ok and not down then heldActions[key] = nil end
+				end
+				if not heldActions[key] and skillReady(name) then
+					local ok = pcall(function() input.VirtualPress(action) end)
+					if ok then heldActions[key] = action end
+				end
+			end
 		end
 		return
 	end
 	releaseHold()
 	if State.autoSkills and os.clock() - State.lastSkill > 1 then
-		for _, key in { "Z", "X", "C", "V", "B" } do
+		local keys = { "Z", "X", "C", "V", "B" }
+		for offset = 1, #keys do
+			local index = (skillCursor + offset - 1) % #keys + 1
+			local key = keys[index]
 			if State.selectedSkills[key] then
 				local action, name = skillAction(key)
 				if skillReady(name) then
 					State.lastSkill = os.clock()
+					skillCursor = index
 					press(action, 0.05)
 					break
 				end
@@ -883,15 +954,16 @@ local function promptPosition(prompt: ProximityPrompt): Vector3?
 	return nil
 end
 
-local function usePrompt(prompt: ProximityPrompt, maxDistance: number)
+local function usePrompt(prompt: ProximityPrompt, maxDistance: number): boolean
 	local _, _, root = getCharacter()
 	local position = promptPosition(prompt)
-	if not root or not position or not prompt.Enabled or (position - root.Position).Magnitude > maxDistance then return end
+	local activation = math.max(1, prompt.MaxActivationDistance - 1)
+	if not root or not position or not prompt.Enabled or (position - root.Position).Magnitude > math.min(maxDistance, activation) then return false end
 	local trigger = (global :: any).fireproximityprompt
 	if type(trigger) == "function" then
-		pcall(trigger, prompt)
+		return pcall(trigger, prompt)
 	else
-		pcall(function()
+		return pcall(function()
 			prompt:InputHoldBegin()
 			task.wait(prompt.HoldDuration + 0.05)
 			prompt:InputHoldEnd()
@@ -899,18 +971,277 @@ local function usePrompt(prompt: ProximityPrompt, maxDistance: number)
 	end
 end
 
+local function field(instance: Instance?, keys: {string}): any
+	if not instance then return nil end
+	for _, key in keys do
+		local value = instance:GetAttribute(key)
+		if value ~= nil then return value end
+		local child = instance:FindFirstChild(key)
+		if child and child:IsA("ValueBase") then return (child :: any).Value end
+	end
+	return nil
+end
+
+local function currentLevel(): number?
+	local keys = { "CombatLevel", "Combat_Level", "Level", "Lvl" }
+	local containers: {Instance} = { player }
+	local stats = player:FindFirstChild("leaderstats")
+	local data = player:FindFirstChild("Data")
+	if stats then table.insert(containers, stats) end
+	if data then table.insert(containers, data) end
+	if player.Character then table.insert(containers, player.Character) end
+	for _, container in containers do
+		local level = tonumber(field(container, keys))
+		if level then return level end
+	end
+	local gui = player:FindFirstChild("PlayerGui")
+	if gui then
+		local explicit: number? = nil
+		local generic: {[number]: boolean} = {}
+		for _, child in gui:GetDescendants() do
+			if child:IsA("TextLabel") and child.Visible then
+				local text = child.Text
+				local path = child:GetFullName():lower()
+				if not path:find("mastery", 1, true) and not text:lower():find("mastery", 1, true) then
+					local level = tonumber(text:match("[Ll][Vv]%s*%.?%s*(%d+)") or text:match("[Ll]evel%s*(%d+)"))
+					if level then
+						if child.Name:lower():find("level", 1, true) then explicit = level else generic[level] = true end
+					end
+				end
+			end
+		end
+		if explicit then return explicit end
+		local only: number? = nil
+		for value in generic do
+			if only then return nil end
+			only = value
+		end
+		return only
+	end
+	return nil
+end
+
+local QUEST_TARGET_KEYS = { "QuestTarget", "TargetMob", "RequiredMob", "EnemyName", "MobName" }
+local QUEST_LEVEL_KEYS = { "RequiredLevel", "MinLevel", "LevelRequirement", "CombatLevel", "RequiredCombatLevel", "MinCombatLevel", "CombatRequiredLevel" }
+
+local function activeQuestTarget(): string?
+	local containers: {Instance} = { player }
+	local current = player:FindFirstChild("CurrentQuest")
+	local quest = player:FindFirstChild("Quest")
+	local data = player:FindFirstChild("Data")
+	if current then table.insert(containers, current) end
+	if quest then table.insert(containers, quest) end
+	if data then table.insert(containers, data) end
+	for _, container in containers do
+		local target = field(container, QUEST_TARGET_KEYS)
+		if type(target) == "string" and target ~= "" then return target end
+	end
+	return nil
+end
+
+local function questComplete(): boolean
+	local containers: {Instance} = { player }
+	local current = player:FindFirstChild("CurrentQuest")
+	local quest = player:FindFirstChild("Quest")
+	if current then table.insert(containers, current) end
+	if quest then table.insert(containers, quest) end
+	for _, container in containers do
+		if field(container, { "QuestCompleted", "IsComplete", "Completed" }) == true then return true end
+	end
+	return false
+end
+
+type QuestEntry = { Prompt: ProximityPrompt, Giver: Instance, Position: Vector3, Level: number, Target: string? }
+local function bestQuest(level: number): QuestEntry?
+	local _, _, root = getCharacter()
+	if not root then return nil end
+	local best: QuestEntry? = nil
+	local bestDistance = math.huge
+	for prompt in trackedPrompts do
+		if prompt.Parent and prompt.Enabled then
+			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
+			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
+			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
+			local rawLevel = field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS)
+			local required = tonumber(rawLevel) or tonumber(tostring(rawLevel):match("%d+")) or 0
+			local target = field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS)
+			local questLike = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true or text:find("quest", 1, true) ~= nil
+			if questLike and required <= level then
+				local position = promptPosition(prompt)
+				if position then
+					local distance = (position - root.Position).Magnitude
+					if not best or required > best.Level or (required == best.Level and distance < bestDistance) then
+						best = { Prompt = prompt, Giver = giver, Position = position, Level = required,
+							Target = if type(target) == "string" and target ~= "" then target else nil }
+						bestDistance = distance
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function inspectQuestData()
+	print("[Lukiho] Level:", currentLevel(), "Active target:", activeQuestTarget(), "Complete:", questComplete())
+	local count = 0
+	for prompt in trackedPrompts do
+		if prompt.Parent then
+			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+			local text = (giver.Name .. " " .. prompt.ActionText .. " " .. prompt.ObjectText):lower()
+			if text:find("quest", 1, true) or text:find("talk", 1, true)
+				or CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver") then
+				count += 1
+				print("[Lukiho] Quest NPC:", giver:GetFullName(), "Action:", prompt.ActionText,
+					"Required level:", field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS),
+					"Target:", field(prompt, QUEST_TARGET_KEYS) or field(giver, QUEST_TARGET_KEYS))
+				if count >= 30 then break end
+			end
+		end
+	end
+	print("[Lukiho] Quest NPC entries shown:", count)
+end
+
+local questRetryAt = 0
+local wasQuestComplete = false
+local function questStatus(message: string)
+	if State.questStatus == message then return end
+	State.questStatus = message
+	if questStatusLabel then questStatusLabel:SetText(message) end
+end
+
+supervise("auto level", 1, function()
+	if not State.autoLevel then
+		State.levelTarget = nil
+		State.questGiver = nil
+		questStatus("Idle")
+		return
+	end
+	if State.manualTravel or not live() then return end
+	local level = currentLevel()
+	if not level then
+		State.levelTarget = nil
+		State.travelDestination = nil
+		clearTarget()
+		questStatus("Level data unavailable")
+		return
+	end
+	local quest = bestQuest(level)
+	local active = activeQuestTarget()
+	local completed = questComplete()
+	local justCompleted = completed and not wasQuestComplete
+	wasQuestComplete = completed
+	if completed then
+		State.levelTarget = nil
+		if justCompleted then questRetryAt = 0 end
+		clearTarget()
+	elseif active then
+		if State.levelTarget ~= active then
+			clearTarget()
+			State.travelDestination = nil
+		end
+		State.levelTarget = active
+		questStatus(string.format("Lv %d | Target: %s", level, active))
+		return
+	elseif State.levelTarget and os.clock() < questRetryAt then
+		questStatus(string.format("Lv %d | Quest requested: %s", level, State.levelTarget))
+		return
+	else
+		if State.levelTarget then clearTarget() end
+		State.levelTarget = nil
+	end
+	if not quest then
+		State.travelDestination = nil
+		questStatus(string.format("Lv %d | No quest giver in client data", level))
+		return
+	end
+	State.questGiver = quest.Giver
+	local _, _, root = getCharacter()
+	if not root then return end
+	local distance = (root.Position - quest.Position).Magnitude
+	if distance > math.min(8, math.max(1, quest.Prompt.MaxActivationDistance - 1)) then
+		State.travelDestination = quest.Position + Vector3.new(0, 2, 0)
+		questStatus(string.format("Lv %d | Traveling to %s", level, quest.Giver.Name))
+	elseif os.clock() >= questRetryAt then
+		if usePrompt(quest.Prompt, 8) then
+			questRetryAt = os.clock() + 20
+			State.travelDestination = nil
+			State.levelTarget = quest.Target
+			questStatus(if quest.Target then "Quest requested: " .. quest.Target else "Quest requested; waiting for target data")
+		end
+	end
+end)
+
 local function tierMatches(chest: Instance): boolean
 	if State.selectedTier == "All" then return true end
 	local tier = tostring(chest:GetAttribute("Tier") or chest:GetAttribute("ChestId") or chest.Name)
 	return tier:lower():find(State.selectedTier:lower(), 1, true) ~= nil
 end
 
-supervise("loot", 0.6, function()
-	if not live() or not (State.autoLoot or State.autoChest or State.autoChestFarm or os.clock() < State.postKillUntil) then return end
+local function isLootPrompt(prompt: ProximityPrompt): boolean
 	local drops = Workspace:FindFirstChild("LootDrops")
-	if drops and (State.autoLoot or os.clock() < State.postKillUntil) then
-		for _, item in drops:GetDescendants() do
-			if item:IsA("ProximityPrompt") then usePrompt(item, State.lootRadius) end
+	if drops and prompt:IsDescendantOf(drops) then return true end
+	if CollectionService:HasTag(prompt, "LootDrop") then return true end
+	local text = (prompt.Name .. " " .. prompt.ActionText):lower()
+	return text:find("loot", 1, true) ~= nil or text:find("pick up", 1, true) ~= nil
+		or text:find("pickup", 1, true) ~= nil or text:find("collect", 1, true) ~= nil
+		or text:find("claim", 1, true) ~= nil or text:find("take", 1, true) ~= nil
+end
+
+local function nearestLootPrompt(): (ProximityPrompt?, number)
+	local _, _, root = getCharacter()
+	if not root then return nil, math.huge end
+	local nearest: ProximityPrompt? = nil
+	local distance = State.lootRadius
+	for prompt in trackedPrompts do
+		if prompt.Parent and prompt.Enabled and isLootPrompt(prompt) then
+			local position = promptPosition(prompt)
+			if position then
+				local current = (position - root.Position).Magnitude
+				if current <= distance then nearest, distance = prompt, current end
+			end
+		end
+	end
+	return nearest, distance
+end
+
+local lastLootAttempt: {[ProximityPrompt]: number} = {}
+supervise("loot", 0.6, function()
+	local collecting = State.autoLoot or os.clock() < State.postKillUntil
+	if (not collecting or State.autoLevel) and State.lootPrompt then
+		State.lootPrompt = nil
+		State.travelDestination = nil
+	end
+	if not live() or not (collecting or State.autoChest or State.autoChestFarm) then
+		if State.lootPrompt then State.travelDestination = nil end
+		State.lootPrompt = nil
+		return
+	end
+	for prompt in lastLootAttempt do
+		if not prompt.Parent then lastLootAttempt[prompt] = nil end
+	end
+	if collecting then
+		local prompt, distance = nearestLootPrompt()
+		if prompt then
+			local activation = math.max(1, prompt.MaxActivationDistance - 1)
+			if distance <= activation then
+				if State.lootPrompt == prompt then State.travelDestination = nil end
+				State.lootPrompt = nil
+				if os.clock() - (lastLootAttempt[prompt] or 0) > 2 then
+					lastLootAttempt[prompt] = os.clock()
+					usePrompt(prompt, activation)
+				end
+			elseif not activeTarget() and not State.autoLevel and not State.manualTravel and not State.autoChestFarm then
+				local position = promptPosition(prompt)
+				if position then
+					State.lootPrompt = prompt
+					State.travelDestination = position + Vector3.new(0, 2, 0)
+				end
+			end
+		elseif State.lootPrompt then
+			State.lootPrompt = nil
+			State.travelDestination = nil
 		end
 	end
 	local chests = Workspace:FindFirstChild("Chests")
@@ -932,11 +1263,127 @@ supervise("loot", 0.6, function()
 	end
 end)
 
+type EspMarker = { Gui: BillboardGui, Label: TextLabel }
+local espMarkers: {[Instance]: EspMarker} = {}
+local function clearEsp()
+	for instance, marker in espMarkers do
+		marker.Gui:Destroy()
+		espMarkers[instance] = nil
+	end
+end
+
+local function markerPart(instance: Instance): BasePart?
+	if instance:IsA("BasePart") then return instance end
+	if instance:IsA("Attachment") and instance.Parent and instance.Parent:IsA("BasePart") then return instance.Parent end
+	if instance:IsA("Model") then
+		return instance:FindFirstChild("HumanoidRootPart") :: BasePart? or instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function newEspMarker(part: BasePart): EspMarker
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "LukihoESP"
+	gui.Adornee = part
+	gui.AlwaysOnTop = true
+	gui.Size = UDim2.fromOffset(170, 30)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+	gui.MaxDistance = State.espRadius
+	gui.Parent = player:WaitForChild("PlayerGui")
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundColor3 = Color3.fromRGB(19, 20, 23)
+	label.BackgroundTransparency = 0.12
+	label.BorderSizePixel = 0
+	label.Font = Enum.Font.GothamMedium
+	label.TextSize = 12
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Parent = gui
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 5)
+	corner.Parent = label
+	return { Gui = gui, Label = label }
+end
+
+supervise("esp", 1, function()
+	if not State.espEnabled then clearEsp(); return end
+	local _, _, root = getCharacter()
+	if not root then clearEsp(); return end
+	type Candidate = { Instance: Instance, Part: BasePart, Name: string, Color: Color3, Distance: number }
+	local candidates: {Candidate} = {}
+	local seen: {[Instance]: boolean} = {}
+	local function add(instance: Instance, part: BasePart?, name: string, color: Color3)
+		if not part or seen[instance] then return end
+		seen[instance] = true
+		local distance = (part.Position - root.Position).Magnitude
+		if distance <= State.espRadius then
+			table.insert(candidates, { Instance = instance, Part = part, Name = name, Color = color, Distance = distance })
+		end
+	end
+	local function addNpc(model: Model)
+		local humanoid, part = candidate(model)
+		if not humanoid or not part then return end
+		if isBossModel(model) and State.espBosses then
+			add(model, part, "BOSS  " .. model.Name, Color3.fromRGB(255, 126, 170))
+		elseif not isBossModel(model) and State.espMobs then
+			add(model, part, "MOB  " .. model.Name, Color3.fromRGB(234, 235, 239))
+		end
+	end
+	local humanoids = Workspace:FindFirstChild("Humanoids")
+	if humanoids then
+		for _, instance in humanoids:GetDescendants() do
+			if instance:IsA("Model") then addNpc(instance) end
+		end
+	end
+	local bossFolder = Workspace:FindFirstChild("Bosses")
+	if bossFolder then
+		for _, instance in bossFolder:GetDescendants() do
+			if instance:IsA("Model") then addNpc(instance) end
+		end
+	end
+	for _, tag in { "Enemy", "Boss", "EventBoss" } do
+		for _, instance in CollectionService:GetTagged(tag) do
+			if instance:IsA("Model") then addNpc(instance) end
+		end
+	end
+	for prompt in trackedPrompts do
+		if prompt.Parent and prompt.Enabled then
+			local text = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
+			local giver = prompt:FindFirstAncestorOfClass("Model")
+			local quest = (giver and (CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")))
+				or text:find("quest", 1, true) ~= nil
+			if quest and State.espQuests then
+				add(prompt, markerPart(prompt.Parent), "QUEST  " .. (prompt.ObjectText ~= "" and prompt.ObjectText or (giver and giver.Name or "NPC")), Color3.fromRGB(255, 205, 105))
+			elseif State.espInteractables then
+				add(prompt, markerPart(prompt.Parent), "ITEM  " .. (prompt.ObjectText ~= "" and prompt.ObjectText or prompt.Parent.Name), Color3.fromRGB(99, 215, 183))
+			end
+		end
+	end
+	table.sort(candidates, function(a, b) return a.Distance < b.Distance end)
+	local active: {[Instance]: boolean} = {}
+	for index = 1, math.min(#candidates, 250) do
+		local entry = candidates[index]
+		active[entry.Instance] = true
+		local marker = espMarkers[entry.Instance]
+		if not marker then
+			marker = newEspMarker(entry.Part)
+			espMarkers[entry.Instance] = marker
+		end
+		marker.Gui.Adornee = entry.Part
+		marker.Gui.MaxDistance = State.espRadius
+		marker.Label.TextColor3 = entry.Color
+		marker.Label.Text = string.format("%s  [%d studs]", entry.Name, math.round(entry.Distance))
+	end
+	for instance, marker in espMarkers do
+		if not active[instance] then marker.Gui:Destroy(); espMarkers[instance] = nil end
+	end
+end)
+
 connect(RunService.Heartbeat, function(dt: number)
 	if not live() then return end
 	local character, humanoid, root = getCharacter()
 	if not character or not humanoid or not root then return end
-	local automationMoving = activeTarget() and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.manualTravel)
+	local automationMoving = activeTarget() and (State.autoFarm or State.autoBoss or State.autoChestFarm or State.autoLevel or State.manualTravel)
 	local destination: CFrame? = nil
 	if automationMoving then
 		local targetRoot = State.targetRoot :: BasePart
@@ -944,7 +1391,7 @@ connect(RunService.Heartbeat, function(dt: number)
 		local height = if os.clock() < State.dodgingUntil then State.dodgeHeight else State.attackHeight
 		local position = (targetFrame * CFrame.new(0, height, State.attackOffset)).Position
 		destination = CFrame.lookAt(position, targetFrame.Position)
-	elseif State.travelDestination and (State.autoBoss or State.autoChestFarm or State.manualTravel) then
+	elseif State.travelDestination and (State.autoBoss or State.autoChestFarm or State.autoLevel or State.manualTravel or State.lootPrompt) then
 		local travel = State.travelDestination :: Vector3
 		destination = CFrame.lookAt(travel, travel + root.CFrame.LookVector)
 	end
@@ -1024,6 +1471,7 @@ local function unload()
 	releaseHold()
 	release("Combat")
 	clearTarget()
+	clearEsp()
 	for _, connection in connections do connection:Disconnect() end
 	table.clear(connections)
 	for part, value in collisionStates do
@@ -1062,6 +1510,7 @@ local loaded, failure = xpcall(function()
 		Farm = window:AddTab("Farm", "swords"),
 		Movement = window:AddTab("Movement", "navigation"),
 		Loot = window:AddTab("Chests & Loot", "package"),
+		ESP = window:AddTab("ESP", "eye"),
 		Settings = window:AddTab("UI Settings", "settings"),
 	}
 	local farm = tabs.Farm:AddGroupbox({ Side = "Left", Name = "Mob Farming", IconName = "swords" })
@@ -1069,8 +1518,11 @@ local loaded, failure = xpcall(function()
 		State.autoFarm = value
 		if value then
 			State.autoBoss = false
+			State.autoLevel = false
 			local other = library.Toggles.LukihoBoss
 			if other and other.Value then other:SetValue(false) end
+			local level = library.Toggles.LukihoAutoLevel
+			if level and level.Value then level:SetValue(false) end
 		end
 	end })
 	mobDropdown = farm:AddDropdown("LukihoMobFilter", {
@@ -1091,6 +1543,24 @@ local loaded, failure = xpcall(function()
 	farm:AddSlider("LukihoHeight", { Text = "Attack Height", Min = -20, Max = 20, Default = -6, Rounding = 1, Callback = function(value: number) State.attackHeight = value end })
 	farm:AddSlider("LukihoDodge", { Text = "Dodge Height", Min = 0, Max = 50, Default = 22, Rounding = 0, Callback = function(value: number) State.dodgeHeight = value end })
 	farm:AddSlider("LukihoTrack", { Text = "NoClip Travel Speed", Min = 20, Max = 1000, Default = 180, Rounding = 0, Suffix = " studs/s", Callback = function(value: number) State.trackSpeed = value end })
+	local leveling = tabs.Farm:AddGroupbox({ Side = "Left", Name = "Auto Level", IconName = "map-pin" })
+	leveling:AddToggle("LukihoAutoLevel", { Text = "Auto Level", Default = false, Callback = function(value: boolean)
+		State.autoLevel = value
+		if value then
+			for _, key in { "LukihoAutoFarm", "LukihoBoss" } do
+				local other = library.Toggles[key]
+				if other and other.Value then other:SetValue(false) end
+			end
+		else
+			State.levelTarget = nil
+			State.questGiver = nil
+			State.travelDestination = nil
+			clearTarget()
+			questStatus("Idle")
+		end
+	end })
+	questStatusLabel = leveling:AddLabel("Idle")
+	leveling:AddButton({ Text = "Inspect Quest Data", Func = inspectQuestData })
 	local combat = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Combat & Skills", IconName = "zap" })
 	weaponDropdown = combat:AddDropdown("LukihoWeapon", {
 		Text = "Hotbar Item",
@@ -1103,16 +1573,19 @@ local loaded, failure = xpcall(function()
 	})
 	combat:AddSlider("LukihoCombo", { Text = "Combo Interval", Min = 0.2, Max = 0.5, Default = 0.28, Rounding = 2, Callback = function(value: number) State.comboDelay = value end })
 	combat:AddToggle("LukihoSkills", { Text = "Auto Cast Ready Skills", Default = false, Callback = function(value: boolean) State.autoSkills = value end })
-	combat:AddDropdown("LukihoSkillKeys", { Text = "Auto Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, Default = { "Z", "X", "C", "V", "B" }, Callback = function(value: {[string]: boolean}) State.selectedSkills = value end })
-	combat:AddToggle("LukihoHold", { Text = "Hold Skill", Default = false, Callback = function(value: boolean) State.holdSkill = value; if not value then releaseHold() end end })
-	combat:AddDropdown("LukihoHeldKey", { Text = "Held Skill", Values = { "Z", "X", "C", "V", "B" }, Default = 1, Callback = function(value: string) releaseHold(); State.selectedSkill = value end })
+	combat:AddDropdown("LukihoSkillKeys", { Text = "Auto Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.selectedSkills = value end })
+	combat:AddToggle("LukihoHold", { Text = "Hold Selected Skills", Default = false, Callback = function(value: boolean) State.holdSkill = value; if not value then releaseHold() end end })
+	combat:AddDropdown("LukihoHoldKeys", { Text = "Hold Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, AllowNull = true, Default = {}, Callback = function(value: {[string]: boolean}) State.holdSkillKeys = value end })
 	local bosses = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Bosses", IconName = "skull" })
 	bosses:AddToggle("LukihoBoss", { Text = "Farm Registered Bosses", Default = false, Callback = function(value: boolean)
 		State.autoBoss = value
 		if value then
 			State.autoFarm = false
+			State.autoLevel = false
 			local other = library.Toggles.LukihoAutoFarm
 			if other and other.Value then other:SetValue(false) end
+			local level = library.Toggles.LukihoAutoLevel
+			if level and level.Value then level:SetValue(false) end
 		end
 	end })
 	bossDropdown = bosses:AddDropdown("LukihoBossFilter", {
@@ -1148,6 +1621,13 @@ local loaded, failure = xpcall(function()
 	loot:AddToggle("LukihoFarmChest", { Text = "Farm Chest Guards", Default = false, Callback = function(value: boolean) State.autoChestFarm = value end })
 	loot:AddDropdown("LukihoTier", { Text = "Chest Tier", Values = { "All", "Common", "Rare", "T1", "T2", "T3", "T4", "T5" }, Default = 1, Callback = function(value: string) State.selectedTier = value end })
 	loot:AddSlider("LukihoLootRadius", { Text = "Loot Radius", Min = 10, Max = 100, Default = 40, Rounding = 0, Callback = function(value: number) State.lootRadius = value end })
+	local esp = tabs.ESP:AddGroupbox({ Side = "Left", Name = "Map ESP", IconName = "eye" })
+	esp:AddToggle("LukihoESP", { Text = "ESP", Default = false, Callback = function(value: boolean) State.espEnabled = value; if not value then clearEsp() end end })
+	esp:AddSlider("LukihoESPRadius", { Text = "Display Radius", Min = 100, Max = 10000, Default = 10000, Rounding = 0, Suffix = " studs", Callback = function(value: number) State.espRadius = value end })
+	esp:AddToggle("LukihoESPMobs", { Text = "Mobs", Default = true, Callback = function(value: boolean) State.espMobs = value end })
+	esp:AddToggle("LukihoESPBosses", { Text = "Bosses", Default = true, Callback = function(value: boolean) State.espBosses = value end })
+	esp:AddToggle("LukihoESPQuests", { Text = "Quest NPCs", Default = true, Callback = function(value: boolean) State.espQuests = value end })
+	esp:AddToggle("LukihoESPItems", { Text = "Interactables", Default = true, Callback = function(value: boolean) State.espInteractables = value end })
 	local settings = tabs.Settings:AddGroupbox({ Side = "Left", Name = "Interface", IconName = "settings" })
 	settings:AddLabel("Created by Lukiho")
 	settings:AddLabel("RightControl toggles this menu")
