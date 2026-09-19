@@ -475,12 +475,44 @@ local AREA_MODULE_KEYS = {
 	"RegionSpawns", "TeleportLocations", "Waypoints", "WorldLocations",
 }
 
+local AREA_DATA_BLOCK_WORDS = {
+	"answer", "choice", "conversation", "dialog", "objective", "option",
+	"prompt", "quest", "response", "task",
+}
+
+local function validAreaName(value: any): string?
+	if type(value) ~= "string" then return nil end
+	local name = value:gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+	if name == "" or #name > 72 or name:match("^%d+$") then return nil end
+	local lower = name:lower()
+	if table.find({ "misc", "other", "dialogue", "conversation", "choices", "options", "quests" }, lower) then
+		return nil
+	end
+	if lower:find("(lv", 1, true) or lower:match("%f[%a]lvl?%.?%s*:?%s*%d")
+		or lower:match("%f[%a]level%s*:?%s*%d") then return nil end
+	if lower:match("^i'll%s") or lower:match("^ill%s") or lower:match("^i%s+will%s") then return nil end
+	for _, prefix in { "accept ", "clear out ", "deal with ", "defeat ", "drive ", "fell ", "hunt ", "kill ", "slay ", "take " } do
+		if lower:sub(1, #prefix) == prefix then return nil end
+	end
+	return name
+end
+
+local function areaDataBranchAllowed(key: any): boolean
+	if type(key) ~= "string" then return true end
+	local lower = key:lower()
+	for _, word in AREA_DATA_BLOCK_WORDS do
+		if lower:find(word, 1, true) then return false end
+	end
+	return true
+end
+
 local function scanTravelCatalog(): ({string}, {[string]: Vector3}, {string}, {[string]: TravelEntry})
 	local nextAreas: {[string]: Vector3} = {}
 	local nextTargets: {[string]: TravelEntry} = {}
 	local function addArea(name: any, position: Vector3?)
-		if type(name) ~= "string" or name == "" or not position then return end
-		nextAreas[name] = position
+		local validName = validAreaName(name)
+		if not validName or not position then return end
+		nextAreas[validName] = position
 	end
 	local function addTarget(label: string, entry: TravelEntry)
 		if label == "" then return end
@@ -491,13 +523,17 @@ local function scanTravelCatalog(): ({string}, {[string]: Vector3}, {string}, {[
 	if type(regions) == "table" then
 		local visited: {[any]: boolean} = {}
 		local function readAreaTable(node: any, depth: number)
-			if type(node) ~= "table" or visited[node] or depth > 4 then return end
+			if type(node) ~= "table" or visited[node] or depth > 3 then return end
 			visited[node] = true
 			for key, value in node do
-				local entryName = if type(value) == "table" and type(value.Name) == "string" then value.Name else tostring(key)
+				local explicitName = if type(value) == "table" then value.AreaName or value.RegionName
+					or value.LocationName or value.DisplayName or value.Name else nil
+				local entryName = explicitName or (if type(key) == "string" then key else nil)
 				local position = tablePosition(value)
-				if position and type(key) ~= "number" then addArea(entryName, position) end
-				if type(value) == "table" and not position then readAreaTable(value, depth + 1) end
+				if position and entryName then addArea(entryName, position) end
+				if type(value) == "table" and not position and areaDataBranchAllowed(key) then
+					readAreaTable(value, depth + 1)
+				end
 			end
 		end
 		for _, key in AREA_MODULE_KEYS do readAreaTable(regions[key], 1) end

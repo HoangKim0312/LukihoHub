@@ -52,6 +52,9 @@ merchants, trainers, and talk/shop prompts. Manual travel searches the full repl
 map instead of using the auto-farm search radius, enables collision bypass only while
 moving, and can be cancelled with **Stop Travel**. Destinations that are not replicated
 to the client and have no registered coordinates cannot be listed or reached.
+The area catalog ignores dialogue, conversation, choice, quest, response, and objective
+branches inside region modules. Sentence-like quest answers and names containing a
+level requirement are rejected even when they share a valid boss/NPC position.
 
 Auto Level reads the player level from attributes, nested data/leaderstats, or visible
 HUD labels such as `117`, `Lv. 117`, and `Level: 117`. Mastery, combat, dialogue,
