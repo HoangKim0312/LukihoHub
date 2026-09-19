@@ -6,11 +6,11 @@ if not game:IsLoaded() then
 end
 
 local BASE_URL = "https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/"
-local SCRIPTS_BY_PLACE: {[number]: string} = {
-	[16205713724] = "LukihoHub.client.lua",
+local SCRIPTS_BY_GAME: {[number]: string} = {
+	[5595353122] = "LukihoHub.client.lua",
 }
 
-local scriptName = SCRIPTS_BY_PLACE[game.PlaceId]
+local scriptName = SCRIPTS_BY_GAME[game.GameId]
 if not scriptName then
 	return
 end

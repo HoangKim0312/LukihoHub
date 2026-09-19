@@ -2,7 +2,7 @@
 -- Lukiho Automation Console. Run only in an experience you own and can test.
 -- Game-specific module paths below are taken from the supplied reference script.
 
-if game.PlaceId ~= 16205713724 then
+if game.GameId ~= 5595353122 then
 	return
 end
 
