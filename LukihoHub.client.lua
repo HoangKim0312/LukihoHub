@@ -31,10 +31,10 @@ type StateType = {
 	holdSkill: boolean,
 	selectedSkill: string,
 	selectedSkills: {[string]: boolean},
-	selectedMob: string,
-	selectedBoss: string,
+	selectedMob: string?,
+	selectedBoss: string?,
 	selectedTier: string,
-	weaponSlot: string,
+	weaponSlot: number?,
 	searchRadius: number,
 	lootRadius: number,
 	attackOffset: number,
@@ -78,10 +78,10 @@ local State: StateType = {
 	holdSkill = false,
 	selectedSkill = "Z",
 	selectedSkills = { Z = true, X = true, C = true, V = true, B = true },
-	selectedMob = "All",
-	selectedBoss = "All",
+	selectedMob = nil,
+	selectedBoss = nil,
 	selectedTier = "All",
-	weaponSlot = "Slot 1",
+	weaponSlot = nil,
 	searchRadius = 1000,
 	lootRadius = 40,
 	attackOffset = 4.5,
@@ -125,8 +125,16 @@ local lastEquip = 0
 local speedBaseline: {[Humanoid]: number} = {}
 local mobDropdown: any = nil
 local bossDropdown: any = nil
+local weaponDropdown: any = nil
 local mobNames = { "All" }
 local bossNames = { "All" }
+local weaponNames: {string} = {}
+local weaponSlots: {[string]: number} = {}
+local observedMobs: {[string]: boolean} = {}
+local observedBosses: {[string]: boolean} = {}
+local registeredBosses: {[string]: boolean} = {}
+local bossSpawnPositions: {[string]: Vector3} = {}
+local npcSpawnPositions: {[string]: Vector3} = {}
 
 local function connect(signal: RBXScriptSignal, callback: (...any) -> ()): Connection
 	local connection = signal:Connect(callback)
@@ -159,6 +167,10 @@ end
 
 local input: any = requirePath(ReplicatedStorage, { "CAM", "Client", "Components", "Client", "InputHandler" })
 local skillsProvider: any = requirePath(ReplicatedStorage, { "CAM", "Client", "Controllers", "Skills_Provider" })
+local worldBosses: any = requirePath(ReplicatedStorage, { "CAM", "Client", "Modules", "WorldBosses" })
+local regions: any = requirePath(ReplicatedStorage, { "Regions" })
+local items: any = requirePath(ReplicatedStorage, { "CAM", "Global", "Collectibles", "Items" })
+local characterInfo: any = requirePath(ReplicatedStorage, { "CAM", "Global", "Character_info_provider" })
 if not input or type(input.VirtualPress) ~= "function" or type(input.VirtualRelease) ~= "function" then
 	warn("[Lukiho] InputHandler missing or incompatible; combat controls disabled.")
 end
@@ -301,6 +313,7 @@ local function candidate(model: Model): (Humanoid?, BasePart?)
 end
 
 local function isBossModel(model: Model): boolean
+	if registeredBosses[model.Name] then return true end
 	if CollectionService:HasTag(model, "Boss") or CollectionService:HasTag(model, "EventBoss") then
 		return true
 	end
@@ -325,20 +338,72 @@ local function isBossModel(model: Model): boolean
 	return spawns ~= nil and spawns:FindFirstChild(model.Name) ~= nil
 end
 
+local function readPosition(value: any): Vector3?
+	if typeof(value) == "Vector3" then return value end
+	if typeof(value) == "CFrame" then return value.Position end
+	if type(value) ~= "string" then return nil end
+	local x, y, z = value:match("([^,]+),%s*([^,]+),%s*([^,]+)")
+	if not x or not y or not z then return nil end
+	local px, py, pz = tonumber(x), tonumber(y), tonumber(z)
+	return if px and py and pz then Vector3.new(px, py, pz) else nil
+end
+
+local function refreshGameCatalog()
+	if not worldBosses then worldBosses = requirePath(ReplicatedStorage, { "CAM", "Client", "Modules", "WorldBosses" }) end
+	if not regions then regions = requirePath(ReplicatedStorage, { "Regions" }) end
+	local spawns = if regions and type(regions.NpcSpawns) == "table" then regions.NpcSpawns else nil
+	if worldBosses and type(worldBosses.Get) == "function" then
+		local ok, entries = pcall(worldBosses.Get)
+		if ok and type(entries) == "table" then
+			for _, entry in entries do
+				if type(entry) == "table" and type(entry.Name) == "string" and entry.Name ~= "" then
+					registeredBosses[entry.Name] = true
+					local position = readPosition(entry.Position or (spawns and spawns[entry.Name]))
+					if position then bossSpawnPositions[entry.Name] = position end
+				end
+			end
+		end
+	end
+	local hunts = ReplicatedStorage:FindFirstChild("BossHunts")
+	if hunts then
+		for _, hunt in hunts:GetChildren() do
+			local name = hunt:GetAttribute("Boss")
+			if type(name) == "string" and name ~= "" then registeredBosses[name] = true end
+		end
+	end
+	if spawns then
+		for name, rawPosition in spawns do
+			if type(name) == "string" and name ~= "" and not registeredBosses[name] then
+				observedMobs[name] = true
+				local position = readPosition(rawPosition)
+				if position then npcSpawnPositions[name] = position end
+			end
+		end
+	end
+end
+
 local function scanNpcCatalog(): ({string}, {string})
-	local mobs: {[string]: boolean} = {}
-	local bosses: {[string]: boolean} = {}
+	refreshGameCatalog()
 	local seen: {[Model]: boolean} = {}
 	local function register(model: Model)
 		if seen[model] then return end
 		seen[model] = true
-		local humanoid, root = candidate(model)
-		if not humanoid or not root then return end
-		if isBossModel(model) then bosses[model.Name] = true else mobs[model.Name] = true end
+		if Players:GetPlayerFromCharacter(model) then return end
+		if not model:FindFirstChildOfClass("Humanoid") or not model:FindFirstChild("HumanoidRootPart") then return end
+		if isBossModel(model) then
+			observedBosses[model.Name] = true
+			observedMobs[model.Name] = nil
+		else
+			observedMobs[model.Name] = true
+		end
 	end
 	local humanoids = Workspace:FindFirstChild("Humanoids")
 	if humanoids then
 		for _, item in humanoids:GetDescendants() do
+			if item:IsA("Model") then register(item) end
+		end
+	else
+		for _, item in Workspace:GetDescendants() do
 			if item:IsA("Model") then register(item) end
 		end
 	end
@@ -355,12 +420,20 @@ local function scanNpcCatalog(): ({string}, {string})
 	end
 	local spawns = Workspace:FindFirstChild("BossSpawns")
 	if spawns then
-		for _, marker in spawns:GetChildren() do bosses[marker.Name] = true end
+		for _, marker in spawns:GetChildren() do
+			registeredBosses[marker.Name] = true
+			observedBosses[marker.Name] = true
+			observedMobs[marker.Name] = nil
+		end
+	end
+	for name in registeredBosses do
+		observedBosses[name] = true
+		observedMobs[name] = nil
 	end
 	local nextMobs: {string} = {}
 	local nextBosses: {string} = {}
-	for name in mobs do table.insert(nextMobs, name) end
-	for name in bosses do table.insert(nextBosses, name) end
+	for name in observedMobs do table.insert(nextMobs, name) end
+	for name in observedBosses do table.insert(nextBosses, name) end
 	table.sort(nextMobs)
 	table.sort(nextBosses)
 	table.insert(nextMobs, 1, "All")
@@ -369,6 +442,8 @@ local function scanNpcCatalog(): ({string}, {string})
 end
 
 local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
+	local selected = if bossOnly then State.selectedBoss else State.selectedMob
+	if not selected then return nil, nil, nil end
 	local _, _, playerRoot = getCharacter()
 	if not playerRoot then return nil, nil, nil end
 	local best: Model? = nil
@@ -381,7 +456,6 @@ local function nearestNpc(bossOnly: boolean): (Model?, Humanoid?, BasePart?)
 		seen[model] = true
 		local boss = isBossModel(model)
 		if bossOnly ~= boss then return end
-		local selected = if bossOnly then State.selectedBoss else State.selectedMob
 		if selected ~= "All" and model.Name ~= selected then return end
 		local hum, root = candidate(model)
 		if hum and root then
@@ -417,7 +491,18 @@ end
 local function travelToSelected(bossOnly: boolean)
 	local model, humanoid, root = nearestNpc(bossOnly)
 	if not model or not humanoid or not root then
-		warn("[Lukiho] No matching active " .. (if bossOnly then "boss" else "mob") .. " in search radius.")
+		local selectedName = if bossOnly then State.selectedBoss else State.selectedMob
+		local position: Vector3? = nil
+		if selectedName then
+			position = if bossOnly then bossSpawnPositions[selectedName] else npcSpawnPositions[selectedName]
+		end
+		if position then
+			clearTarget()
+			State.travelDestination = position + Vector3.new(0, 5, 0)
+			State.manualTravel = true
+			return
+		end
+		warn("[Lukiho] Select an active " .. (if bossOnly then "boss" else "mob") .. " or one with a known spawn position.")
 		return
 	end
 	State.travelDestination = nil
@@ -426,8 +511,9 @@ local function travelToSelected(bossOnly: boolean)
 end
 
 local function ensureWeapon()
-	local index = State.weaponSlot:match("%d+")
-	if not index or os.clock() - lastEquip < 0.6 then return end
+	local selectedSlot = State.weaponSlot
+	if not selectedSlot or os.clock() - lastEquip < 0.6 then return end
+	local index = tostring(selectedSlot)
 	local toolbar = player:FindFirstChild("PlayerGui")
 	local holder = toolbar and toolbar:FindFirstChild("ComponentsHolder")
 	local bottom = holder and holder:FindFirstChild("BottomHolder")
@@ -469,23 +555,154 @@ local function sameValues(left: {string}, right: {string}): boolean
 	return true
 end
 
+local function hotbarHolder(): Instance?
+	local playerGui = player:FindFirstChild("PlayerGui")
+	local components = playerGui and playerGui:FindFirstChild("ComponentsHolder")
+	local bottom = components and components:FindFirstChild("BottomHolder")
+	local toolbar = bottom and bottom:FindFirstChild("Toolbar")
+	return toolbar and toolbar:FindFirstChild("SkillHolder")
+end
+
+local iconNames: {[string]: string} = {}
+local indexedItems = false
+local function refreshItemCatalog()
+	if indexedItems then return end
+	if not items then items = requirePath(ReplicatedStorage, { "CAM", "Global", "Collectibles", "Items" }) end
+	if type(items) ~= "table" then return end
+	indexedItems = true
+	for itemName, data in items do
+		if type(itemName) == "string" and type(data) == "table" then
+			for _, key in { "Icon", "Image", "ItemIcon", "IconId", "ImageId", "Thumbnail" } do
+				local image = data[key]
+				if type(image) == "string" or type(image) == "number" then
+					local id = tostring(image):match("%d+")
+					if id then iconNames[id] = itemName end
+				end
+			end
+		end
+	end
+end
+
+local function toolInSlot(index: number): string?
+	local character = player.Character
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	local containers: {Instance} = {}
+	if character then table.insert(containers, character) end
+	if backpack then table.insert(containers, backpack) end
+	for _, container in containers do
+		if container then
+			for _, tool in container:GetChildren() do
+				if tool:IsA("Tool") then
+					for _, key in { "HotbarSlot", "ToolbarSlot", "SlotIndex", "Slot" } do
+						local number = tostring(tool:GetAttribute(key)):match("%d+")
+						if tonumber(number) == index then return tool.Name end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function itemNameAttribute(instance: Instance): string?
+	for _, key in { "ItemName", "ToolName", "DisplayName", "ItemId" } do
+		local value = instance:GetAttribute(key)
+		if (type(value) == "string" and value ~= "") or type(value) == "number" then
+			local item = if type(items) == "table" then items[value] else nil
+			return if type(item) == "table" and type(item.Name) == "string" then item.Name else tostring(value)
+		end
+	end
+	return nil
+end
+
+local function slotItemName(slot: Instance, index: number): (string?, boolean)
+	local attributed = itemNameAttribute(slot)
+	if attributed then return attributed, true end
+	local tool = toolInSlot(index)
+	if tool then return tool, true end
+	local hasIcon = false
+	for _, child in slot:GetDescendants() do
+		attributed = itemNameAttribute(child)
+		if attributed then return attributed, true end
+		if child:IsA("TextLabel") or child:IsA("TextButton") then
+			local value = child.Text:match("^%s*(.-)%s*$")
+			if value and value ~= "" and not value:match("^%d+$") and not value:match("^[xX]%d+$")
+				and not value:match("^Lv%s*%d+") and value ~= "Equip" and value ~= "Unequip"
+				and not table.find({ "Key", "Keybind", "Hotkey", "Stack", "Count" }, child.Name) then
+				return value, true
+			end
+		elseif (child:IsA("ImageLabel") or child:IsA("ImageButton")) and child.Visible and child.Name ~= "CircleSelect" and child.Image ~= "" then
+			hasIcon = true
+			local id = child.Image:match("%d+")
+			if id and iconNames[id] then return iconNames[id], true end
+		end
+	end
+	if hasIcon and characterInfo and type(characterInfo.Get_equipped_tool) == "function" then
+		local selected = slot:FindFirstChild("CircleSelect")
+		if selected and selected:IsA("ImageLabel") and selected.ImageTransparency < 0.72 then
+			local ok, equipped = pcall(characterInfo.Get_equipped_tool, player)
+			if ok and typeof(equipped) == "Instance" then return equipped.Name, true end
+		end
+	end
+	return nil, hasIcon
+end
+
+local function scanHotbar(): ({string}, {[string]: number})
+	refreshItemCatalog()
+	if not characterInfo then characterInfo = requirePath(ReplicatedStorage, { "CAM", "Global", "Character_info_provider" }) end
+	local holder = hotbarHolder()
+	local names: {string} = {}
+	local slots: {[string]: number} = {}
+	if holder then
+		for index = 1, 5 do
+			local slot = holder:FindFirstChild(index .. "_ToolPosition")
+			if slot then
+				local name, occupied = slotItemName(slot, index)
+				if occupied then
+					local label = string.format("%d - %s", index, name or "Name unavailable")
+					table.insert(names, label)
+					slots[label] = index
+				end
+			end
+		end
+	end
+	if #names == 0 then table.insert(names, "Hotbar not detected") end
+	return names, slots
+end
+
 supervise("npc catalog", 2, function()
 	local nextMobs, nextBosses = scanNpcCatalog()
 	if not sameValues(mobNames, nextMobs) then
 		mobNames = nextMobs
-		if not table.find(mobNames, State.selectedMob) then State.selectedMob = "All" end
+		if State.selectedMob and not table.find(mobNames, State.selectedMob) then State.selectedMob = nil end
 		if mobDropdown then
 			mobDropdown:SetValues(mobNames)
-			mobDropdown:SetValue(State.selectedMob)
 		end
 	end
 	if not sameValues(bossNames, nextBosses) then
 		bossNames = nextBosses
-		if not table.find(bossNames, State.selectedBoss) then State.selectedBoss = "All" end
+		if State.selectedBoss and not table.find(bossNames, State.selectedBoss) then State.selectedBoss = nil end
 		if bossDropdown then
 			bossDropdown:SetValues(bossNames)
-			bossDropdown:SetValue(State.selectedBoss)
 		end
+	end
+end)
+
+supervise("hotbar catalog", 2, function()
+	local nextNames, nextSlots = scanHotbar()
+	if sameValues(weaponNames, nextNames) then return end
+	local selectedIndex = State.weaponSlot
+	weaponNames, weaponSlots = nextNames, nextSlots
+	local selectedLabel: string? = nil
+	if selectedIndex then
+		for label, index in weaponSlots do
+			if index == selectedIndex then selectedLabel = label; break end
+		end
+	end
+	State.weaponSlot = if selectedLabel then selectedIndex else nil
+	if weaponDropdown then
+		weaponDropdown:SetValues(weaponNames)
+		weaponDropdown:SetValue(selectedLabel)
 	end
 end)
 
@@ -532,20 +749,29 @@ local function chestGuard(chest: Instance): (Model?, Humanoid?, BasePart?)
 end
 
 local function patrolBoss()
+	if not State.selectedBoss then return end
 	if State.travelDestination then return end
 	if os.clock() - State.lastPatrol < State.patrolInterval then return end
 	local folder = Workspace:FindFirstChild("BossSpawns")
-	if not folder then return end
 	local choices: {Vector3} = {}
-	for _, marker in folder:GetChildren() do
-		if State.selectedBoss == "All" or marker.Name == State.selectedBoss then
-			if marker:IsA("BasePart") then
-				table.insert(choices, marker.Position)
-			elseif marker:IsA("Attachment") then
-				table.insert(choices, marker.WorldPosition)
-			elseif marker:IsA("Model") then
-				table.insert(choices, marker:GetPivot().Position)
+	local mapped: {[string]: boolean} = {}
+	if folder then
+		for _, marker in folder:GetChildren() do
+			if State.selectedBoss == "All" or marker.Name == State.selectedBoss then
+				mapped[marker.Name] = true
+				if marker:IsA("BasePart") then
+					table.insert(choices, marker.Position)
+				elseif marker:IsA("Attachment") then
+					table.insert(choices, marker.WorldPosition)
+				elseif marker:IsA("Model") then
+					table.insert(choices, marker:GetPivot().Position)
+				end
 			end
+		end
+	end
+	for name, position in bossSpawnPositions do
+		if not mapped[name] and (State.selectedBoss == "All" or name == State.selectedBoss) then
+			table.insert(choices, position)
 		end
 	end
 	if #choices == 0 then return end
@@ -581,6 +807,7 @@ supervise("target", 0.35, function()
 	end
 	if activeTarget() then return end
 	if State.manualTravel then
+		if State.travelDestination then return end
 		State.manualTravel = false
 		clearTarget()
 		return
@@ -717,7 +944,7 @@ connect(RunService.Heartbeat, function(dt: number)
 		local height = if os.clock() < State.dodgingUntil then State.dodgeHeight else State.attackHeight
 		local position = (targetFrame * CFrame.new(0, height, State.attackOffset)).Position
 		destination = CFrame.lookAt(position, targetFrame.Position)
-	elseif State.travelDestination and (State.autoBoss or State.autoChestFarm) then
+	elseif State.travelDestination and (State.autoBoss or State.autoChestFarm or State.manualTravel) then
 		local travel = State.travelDestination :: Vector3
 		destination = CFrame.lookAt(travel, travel + root.CFrame.LookVector)
 	end
@@ -736,6 +963,7 @@ connect(RunService.Heartbeat, function(dt: number)
 		end
 		if State.travelDestination and not automationMoving and distance <= 2 then
 			State.travelDestination = nil
+			State.manualTravel = false
 			State.lastPatrol = os.clock()
 		end
 	end
@@ -822,6 +1050,7 @@ local function loadRemote(path: string): any
 end
 
 mobNames, bossNames = scanNpcCatalog()
+weaponNames, weaponSlots = scanHotbar()
 
 local loaded, failure = xpcall(function()
 	library = loadRemote("Library.lua")
@@ -845,12 +1074,14 @@ local loaded, failure = xpcall(function()
 		end
 	end })
 	mobDropdown = farm:AddDropdown("LukihoMobFilter", {
-		Text = "Detected Mob",
+		Text = "Select Mob",
 		Values = mobNames,
-		Default = 1,
+		AllowNull = true,
 		Searchable = true,
-		Callback = function(value: string)
+		Callback = function(value: string?)
 			State.selectedMob = value
+			State.manualTravel = false
+			State.travelDestination = nil
 			clearTarget()
 		end,
 	})
@@ -861,7 +1092,15 @@ local loaded, failure = xpcall(function()
 	farm:AddSlider("LukihoDodge", { Text = "Dodge Height", Min = 0, Max = 50, Default = 22, Rounding = 0, Callback = function(value: number) State.dodgeHeight = value end })
 	farm:AddSlider("LukihoTrack", { Text = "NoClip Travel Speed", Min = 20, Max = 1000, Default = 180, Rounding = 0, Suffix = " studs/s", Callback = function(value: number) State.trackSpeed = value end })
 	local combat = tabs.Farm:AddGroupbox({ Side = "Right", Name = "Combat & Skills", IconName = "zap" })
-	combat:AddDropdown("LukihoWeapon", { Text = "Weapon Slot", Values = { "None", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5" }, Default = 2, Callback = function(value: string) State.weaponSlot = value end })
+	weaponDropdown = combat:AddDropdown("LukihoWeapon", {
+		Text = "Hotbar Item",
+		Values = weaponNames,
+		AllowNull = true,
+		Searchable = true,
+		Callback = function(value: string?)
+			State.weaponSlot = if value then weaponSlots[value] else nil
+		end,
+	})
 	combat:AddSlider("LukihoCombo", { Text = "Combo Interval", Min = 0.2, Max = 0.5, Default = 0.28, Rounding = 2, Callback = function(value: number) State.comboDelay = value end })
 	combat:AddToggle("LukihoSkills", { Text = "Auto Cast Ready Skills", Default = false, Callback = function(value: boolean) State.autoSkills = value end })
 	combat:AddDropdown("LukihoSkillKeys", { Text = "Auto Skill Keys", Values = { "Z", "X", "C", "V", "B" }, Multi = true, Default = { "Z", "X", "C", "V", "B" }, Callback = function(value: {[string]: boolean}) State.selectedSkills = value end })
@@ -877,12 +1116,13 @@ local loaded, failure = xpcall(function()
 		end
 	end })
 	bossDropdown = bosses:AddDropdown("LukihoBossFilter", {
-		Text = "Detected Boss",
+		Text = "Select Boss",
 		Values = bossNames,
-		Default = 1,
+		AllowNull = true,
 		Searchable = true,
-		Callback = function(value: string)
+		Callback = function(value: string?)
 			State.selectedBoss = value
+			State.manualTravel = false
 			clearTarget()
 			State.travelDestination = nil
 		end,
