@@ -1763,10 +1763,11 @@ local function activateGuiObject(object: GuiObject): boolean
 	local ok, virtualInput = pcall(function() return game:GetService("VirtualInputManager") end)
 	if not ok or not virtualInput then return false end
 	local center = object.AbsolutePosition + object.AbsoluteSize / 2
+	local inputManager: any = virtualInput
 	return pcall(function()
-		(virtualInput :: any):SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
+		inputManager:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
 		task.wait(0.04)
-		(virtualInput :: any):SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+		inputManager:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
 	end)
 end
 
