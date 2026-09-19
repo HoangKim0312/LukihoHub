@@ -92,6 +92,10 @@ The scanner retains their parent giver name, level, target phrase, and target po
 then matches them to a replicated prompt by giver name rather than treating the
 choice text as an area. This supports phrases such as `drive back`, `put out`,
 `clear out`, `deal with`, and `fell` in addition to the basic kill verbs.
+Auto Level also reuses the replicated `Workspace.Humanoids` models shown by Map Travel:
+prompts are resolved to their Humanoid ancestor (or the nearest model when the prompt
+is stored separately), and `Demon Slayer` dialogue NPCs are inspected even without
+quest tags. Their conversation still must expose a positive-level combat choice.
 
 Hotbar names are cached per slot so a temporary empty toolbar during death/respawn
 does not replace `2 - Sickles` with `2`. Internal dropdown refreshes do not fire the
@@ -114,6 +118,8 @@ The UI uses a graphite neutral Obsidian theme with restrained blue accents, off-
 text, Gotham font, and separate Farm, Combat, Movement, Loot, ESP, and Settings views.
 Slider value outlines are removed to avoid the library's heavy bold-number effect.
 ThemeManager uses a `Graphite` folder so older saved palettes do not override it.
+The persistent window footer and Settings tab show the current hub version; startup
+also prints `[Lukiho] Hub version:` to the developer console.
 
 ## Studio UI prototype
 

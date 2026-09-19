@@ -2,6 +2,8 @@
 -- Lukiho Automation Console. Run only in an experience you own and can test.
 -- Game-specific module paths below are taken from the supplied reference script.
 
+local HUB_VERSION = "1.6.0"
+
 if game.GameId ~= 5595353122 then
 	return
 end
@@ -18,6 +20,8 @@ local global = _G :: any
 if type(global.LukihoHubUnload) == "function" then
 	global.LukihoHubUnload()
 end
+global.LukihoHubVersion = HUB_VERSION
+print("[Lukiho] Hub version:", HUB_VERSION)
 
 type Connection = RBXScriptConnection
 type StateType = {
@@ -1420,6 +1424,41 @@ local function promptPosition(prompt: ProximityPrompt): Vector3?
 	return nil
 end
 
+local function questPromptGiver(prompt: ProximityPrompt): Instance
+	local current = prompt.Parent
+	local fallback: Model? = nil
+	while current and current ~= Workspace do
+		if current:IsA("Model") then
+			if not fallback then fallback = current end
+			local questTagged = CollectionService:HasTag(current, "QuestNPC") or CollectionService:HasTag(current, "QuestGiver")
+			if current:FindFirstChildOfClass("Humanoid") or questTagged
+				or current:GetAttribute("QuestGiver") == true or current:GetAttribute("NPCName") ~= nil then
+				return current
+			end
+		end
+		current = current.Parent
+	end
+
+	local position = promptPosition(prompt)
+	local humanoids = Workspace:FindFirstChild("Humanoids")
+	if position and humanoids then
+		local nearest: Model? = nil
+		local nearestDistance = 18
+		for _, item in humanoids:GetDescendants() do
+			if item:IsA("Model") and not Players:GetPlayerFromCharacter(item) then
+				local humanoid = item:FindFirstChildOfClass("Humanoid")
+				local root = item:FindFirstChild("HumanoidRootPart")
+				if humanoid and root and root:IsA("BasePart") then
+					local distance = (root.Position - position).Magnitude
+					if distance < nearestDistance then nearest, nearestDistance = item, distance end
+				end
+			end
+		end
+		if nearest then return nearest end
+	end
+	return fallback or (prompt.Parent :: Instance)
+end
+
 local function usePrompt(prompt: ProximityPrompt, maxDistance: number): boolean
 	local _, _, root = getCharacter()
 	local position = promptPosition(prompt)
@@ -1700,10 +1739,14 @@ local function refreshQuestChoiceHints(): {QuestChoiceHint}
 	return questChoiceHints
 end
 
+local function questGiverDisplayName(giver: Instance): string
+	local attributedName = giver:GetAttribute("DisplayName") or giver:GetAttribute("NPCName")
+	return if type(attributedName) == "string" and attributedName ~= "" then attributedName else giver.Name
+end
+
 local function questHintsForGiver(giver: Instance): {QuestOption}
 	local options: {QuestOption} = {}
-	local attributedName = giver:GetAttribute("DisplayName") or giver:GetAttribute("NPCName")
-	local giverName = if type(attributedName) == "string" and attributedName ~= "" then attributedName else giver.Name
+	local giverName = questGiverDisplayName(giver)
 	local giverKey = canonicalName(giverName)
 	for _, hint in refreshQuestChoiceHints() do
 		local ownerMatch = hint.Owner ~= nil and nameMatches(giverName, hint.Owner)
@@ -1720,12 +1763,14 @@ local function questGivers(): {QuestEntry}
 	if not root then return {} end
 	local byGiver: {[Instance]: QuestEntry} = {}
 	for prompt in trackedPrompts do
-		if prompt.Parent and prompt.Enabled then
-			local giver = prompt:FindFirstAncestorOfClass("Model") or prompt.Parent
+		if prompt.Parent then
+			local giver = questPromptGiver(prompt)
+			local giverName = questGiverDisplayName(giver)
 			local position = promptPosition(prompt)
 			if not position then continue end
 			local hints = questHintsForGiver(giver)
-			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giver.Name):lower()
+			local text = (prompt.ActionText .. " " .. prompt.ObjectText .. " " .. giverName):lower()
+			local combatRoleGiver = giverName:lower():find("demon slayer", 1, true) ~= nil
 			local tagged = CollectionService:HasTag(giver, "QuestNPC") or CollectionService:HasTag(giver, "QuestGiver")
 			local questFolder = giver:FindFirstAncestor("QuestNPCs") or giver:FindFirstAncestor("QuestGivers")
 			local rawLevel = field(prompt, QUEST_LEVEL_KEYS) or field(giver, QUEST_LEVEL_KEYS)
@@ -1738,9 +1783,9 @@ local function questGivers(): {QuestEntry}
 				or kind:find("gather", 1, true) ~= nil or kind:find("collect", 1, true) ~= nil
 				or kind:find("talk", 1, true) ~= nil or kind:find("escort", 1, true) ~= nil
 			local dialogue = text:find("chat", 1, true) ~= nil or text:find("talk", 1, true) ~= nil
-				or #hints > 0 or ((tagged or questFolder ~= nil) and target == nil)
+				or combatRoleGiver or #hints > 0 or ((tagged or questFolder ~= nil) and target == nil)
 			local structured = tagged or questFolder ~= nil or field(giver, { "QuestGiver" }) == true
-				or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil or #hints > 0
+				or combatRoleGiver or text:find("quest", 1, true) ~= nil or target ~= nil or rawLevel ~= nil or #hints > 0
 			local questLike = structured and (not explicitlyNonCombat or target ~= nil or #hints > 0)
 			if questLike then
 				local hintLevel = 0
@@ -2537,6 +2582,7 @@ local function unload()
 	if flyVelocity then flyVelocity:Destroy(); flyVelocity = nil end
 	if library then pcall(function() library:Unload() end) end
 	if global.LukihoHubUnload == unload then global.LukihoHubUnload = nil end
+	if global.LukihoHubVersion == HUB_VERSION then global.LukihoHubVersion = nil end
 end
 global.LukihoHubUnload = unload
 
@@ -2586,7 +2632,7 @@ local loaded, failure = xpcall(function()
 	local compactLayout = Workspace.CurrentCamera ~= nil and Workspace.CurrentCamera.ViewportSize.X < 760
 	local window = library:CreateWindow({
 		Title = "LUKIHO",
-		Footer = "Created by Lukiho",
+		Footer = "Created by Lukiho | v" .. HUB_VERSION,
 		Size = UDim2.fromOffset(920, 620),
 		CornerRadius = 6,
 		Font = Enum.Font.Gotham,
@@ -2750,6 +2796,7 @@ local loaded, failure = xpcall(function()
 	esp:AddToggle("LukihoESPQuests", { Text = "Quest NPCs", Default = true, Callback = function(value: boolean) State.espQuests = value end })
 	esp:AddToggle("LukihoESPItems", { Text = "Interactables", Default = true, Callback = function(value: boolean) State.espInteractables = value end })
 	local settings = tabs.Settings:AddGroupbox({ Side = "Left", Name = "Interface", IconName = "settings" })
+	settings:AddLabel("Hub Version: v" .. HUB_VERSION)
 	settings:AddLabel("Menu Keybind"):AddKeyPicker("LukihoMenuKey", { Default = "RightControl", NoUI = true, Text = "Menu", Mode = "Toggle" })
 	library.ToggleKeybind = library.Options.LukihoMenuKey
 	settings:AddButton({ Text = "Unload Hub", Func = unload })
