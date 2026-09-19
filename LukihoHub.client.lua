@@ -1754,21 +1754,32 @@ local function parseDialogueChoice(button: GuiButton): DialogueChoice?
 	return { Button = button, Text = text, Target = target, Level = required }
 end
 
-local function activateGuiButton(button: GuiButton): boolean
+local function activateGuiObject(object: GuiObject): boolean
 	local fireSignal = (global :: any).firesignal
-	if type(fireSignal) == "function" then
-		if button:IsA("TextButton") then return pcall(fireSignal, button.MouseButton1Click) end
-		return pcall(fireSignal, button.Activated)
+	if object:IsA("GuiButton") and type(fireSignal) == "function" then
+		if object:IsA("TextButton") then return pcall(fireSignal, object.MouseButton1Click) end
+		return pcall(fireSignal, object.Activated)
 	end
-	return pcall(function() (button :: any):Activate() end)
+	local ok, virtualInput = pcall(function() return game:GetService("VirtualInputManager") end)
+	if not ok or not virtualInput then return false end
+	local center = object.AbsolutePosition + object.AbsoluteSize / 2
+	return pcall(function()
+		(virtualInput :: any):SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
+		task.wait(0.04)
+		(virtualInput :: any):SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
+	end)
 end
 
-local function dialogueChoices(): ({DialogueChoice}, GuiButton?, GuiButton?, boolean)
+local function activateGuiButton(button: GuiButton): boolean
+	return activateGuiObject(button)
+end
+
+local function dialogueChoices(): ({DialogueChoice}, GuiButton?, GuiObject?, boolean)
 	local gui = player:FindFirstChild("PlayerGui")
 	if not gui then return {}, nil, nil, false end
 	local choices: {DialogueChoice} = {}
 	local closeButton: GuiButton? = nil
-	local advanceButton: GuiButton? = nil
+	local advanceControl: GuiObject? = nil
 	local advanceScore = 0
 	local advanceY = -math.huge
 	local dialogueVisible = false
@@ -1807,9 +1818,12 @@ local function dialogueChoices(): ({DialogueChoice}, GuiButton?, GuiButton?, boo
 					and not name:find("close", 1, true) and not name:find("cancel", 1, true)
 					and not name:find("back", 1, true) and not name:find("exit", 1, true)
 					and child.AbsoluteSize.X <= 160 and child.AbsoluteSize.Y <= 160
-				local score = if namedAdvance or textAdvance then 3 elseif iconAdvance then 2 elseif genericIcon then 1 else 0
+				local narrativeSurface = inDialogue and #text >= 15
+					and child.AbsoluteSize.X >= 180 and child.AbsoluteSize.Y >= 60
+				local score = if namedAdvance or textAdvance then 4 elseif iconAdvance then 3
+					elseif narrativeSurface then 2 elseif genericIcon then 1 else 0
 				if score > advanceScore or (score > 0 and score == advanceScore and child.AbsolutePosition.Y > advanceY) then
-					advanceButton = child
+					advanceControl = child
 					advanceScore = score
 					advanceY = child.AbsolutePosition.Y
 					dialogueVisible = true
@@ -1817,20 +1831,26 @@ local function dialogueChoices(): ({DialogueChoice}, GuiButton?, GuiButton?, boo
 			end
 		end
 	end
-	if not dialogueVisible then
-		for _, child in gui:GetDescendants() do
-			if child:IsA("TextLabel") and guiVisible(child) then
-				local path = child:GetFullName():lower()
-				if path:find("dialog", 1, true) or path:find("conversation", 1, true)
-					or path:find("npcchat", 1, true) or path:find("speech", 1, true)
-					or path:find("story", 1, true) then
-					dialogueVisible = true
-					break
+	for _, child in gui:GetDescendants() do
+		if child:IsA("TextLabel") and guiVisible(child) then
+			local path = child:GetFullName():lower()
+			local inDialogue = path:find("dialog", 1, true) or path:find("conversation", 1, true)
+				or path:find("npcchat", 1, true) or path:find("speech", 1, true)
+				or path:find("story", 1, true)
+			if inDialogue then
+				dialogueVisible = true
+				local text = child.Text:gsub("<[^>]->", ""):match("^%s*(.-)%s*$")
+				local buttonOwner = child:FindFirstAncestorWhichIsA("GuiButton")
+				local narrative = #text >= 15 and child.AbsoluteSize.X >= 180 and child.AbsoluteSize.Y >= 35
+				if narrative and not buttonOwner and advanceScore < 2 then
+					advanceControl = child
+					advanceScore = 2
+					advanceY = child.AbsolutePosition.Y
 				end
 			end
 		end
 	end
-	return choices, closeButton, advanceButton, dialogueVisible
+	return choices, closeButton, advanceControl, dialogueVisible
 end
 
 local pendingQuest: QuestEntry? = nil
@@ -1930,7 +1950,7 @@ supervise("auto level", 1, function()
 		return
 	end
 	if pendingQuest then
-		local choices, closeButton, advanceButton, dialogueVisible = dialogueChoices()
+		local choices, closeButton, advanceControl, dialogueVisible = dialogueChoices()
 		if pendingDialogueMode == "Scan" and #choices > 0 then
 			local found = 0
 			for _, choice in choices do
@@ -1966,8 +1986,8 @@ supervise("auto level", 1, function()
 				end
 			end
 		end
-		if dialogueVisible and advanceButton and dialogueStepCount < 20 and os.clock() >= dialogueAdvanceAt then
-			if activateGuiButton(advanceButton) then
+		if dialogueVisible and advanceControl and dialogueStepCount < 20 and os.clock() >= dialogueAdvanceAt then
+			if activateGuiObject(advanceControl) then
 				dialogueStepCount += 1
 				dialogueAdvanceAt = os.clock() + 0.3
 				dialogueDeadline = math.max(dialogueDeadline, os.clock() + 5)
