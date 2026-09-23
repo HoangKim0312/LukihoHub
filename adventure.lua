@@ -1117,7 +1117,7 @@ if _AA_Window then
 		local tab = TabGroup:Tab({ Name = "In-Game" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Wave Actions" })
-		left:Toggle({ Name = "Auto Sell Units on Wave", Default = false, Callback = function(v) _AA_INGAME.autoSellOnWave = v end }, "AutoSell")
+		left:Toggle({ Name = "Auto Sell Units on Wave", Default = false, Callback = function(v) _AA_INGAME.autoSellOnWave = v; _AA_log("OK", "AutoSell=" .. tostring(v)) end }, "AutoSell")
 		left:Toggle({ Name = "Auto Sell Farms on Wave", Default = false, Callback = function(v) _AA_INGAME.autoSellFarmsOnWave = v end }, "AutoSellFarms")
 		left:Toggle({ Name = "Auto Leave on Wave", Default = false, Callback = function(v) _AA_INGAME.autoLeaveOnWave = v end }, "AutoLeave")
 		left:Toggle({ Name = "Auto Upgrade on Wave", Default = false, Callback = function(v) _AA_INGAME.autoUpgradeOnWave = v end }, "AutoUpgrade")
