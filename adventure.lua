@@ -1031,6 +1031,12 @@ _AA_on(UserInputService.InputBegan, function(input, gp)
 end)
 
 if _AA_Window then
+	-- MacLib on certain executor forks throws "Unable to assign property
+	-- Text. string expected, got nil" inside its internal layout pass.
+	-- That error happens AFTER Window succeeds, so the user sees UI then
+	-- the script dies mid-build. Guard the whole build to keep whatever
+	-- tabs were already created alive and log the failure.
+	local buildOk, buildErr = pcall(function()
 	local TabGroup = _AA_Window:TabGroup()
 
 	-- HOME
@@ -1241,6 +1247,11 @@ if _AA_Window then
 	end
 
 	pcall(function() _AA_Window:Notify({ Title = "LukihoHub", Description = "Loaded. RightControl to toggle." }) end)
+	end)
+	if not buildOk then
+		_AA_log("ERROR", "UI build failed: " .. tostring(buildErr))
+		_AA_log("WARN", "Window is still on screen — RightControl/K toggles it, but controls may be incomplete.")
+	end
 end
 
 ----------------------------------------------------------------
