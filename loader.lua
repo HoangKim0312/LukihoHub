@@ -23,8 +23,13 @@ local function _boot()
 	-- place id -> script filename (each is a self-contained monolithic hub).
 	-- Add more entries here when you ship a hub for a new game; nothing else changes.
 	local SCRIPTS_BY_PLACE = {
-		[4584892739] = "adventure.lua", -- Anime Adventures
-		[5595353122] = "LukihoHub.client.lua", -- Legacy hub (Obsidian UI)
+		-- Anime Adventures
+		[4584892739]  = "adventure.lua",        -- legacy place id (pre-2025)
+		[10715453071] = "adventure.lua",        -- current game id (post-update)
+		-- Legacy hub
+		[5595353122]  = "LukihoHub.client.lua", -- Legacy hub (Obsidian UI)
+		-- Anime Adventures PlaceId variants
+		[94823097601547] = "adventure.lua",
 	}
 
 	local scriptPath = SCRIPTS_BY_PLACE[game.PlaceId]
