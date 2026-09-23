@@ -1,0 +1,6 @@
+# Game source dumps — never commit
+.rbxlx/
+game_source/
+
+# Local tooling
+parse_out.log
