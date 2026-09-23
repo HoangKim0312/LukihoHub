@@ -900,6 +900,17 @@ do
 	end
 end
 
+-- Auto-open UI immediately when window is created (most executors
+-- steal RightControl; K is a safer default keybind).
+_AA_on(UserInputService.InputBegan, function(input, gp)
+	if gp then return end
+	if input.KeyCode == Enum.KeyCode.K then
+		if _AA_Window and type((_AA_Window :: any).Toggle) == "function" then
+			pcall(function() (_AA_Window :: any):Toggle() end)
+		end
+	end
+end)
+
 if _AA_Window then
 	local TabGroup = _AA_Window:TabGroup()
 
