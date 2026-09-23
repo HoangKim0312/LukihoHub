@@ -1077,7 +1077,7 @@ if _AA_Window then
 		left:Dropdown({ Name = "Act", Search = false, Multi = false, Required = false, Options = _AA_DATA.ACTS, Default = 1, Callback = function(v) _AA_LOBBY.selectedAct = v end }, "Act")
 		left:Dropdown({ Name = "Difficulty", Search = false, Multi = false, Required = false, Options = _AA_DATA.DIFFICULTIES, Default = 2, Callback = function(v) _AA_LOBBY.difficulty = v end }, "Difficulty")
 		left:Toggle({ Name = "Friends Only", Default = false, Callback = function(v) _AA_LOBBY.friendsOnly = v end }, "FriendsOnly")
-		left:Toggle({ Name = "Auto Join", Default = false, Callback = function(v) _AA_LOBBY.autoJoin = v end }, "AutoJoin")
+		left:Toggle({ Name = "Auto Join", Default = false, Callback = function(v) _AA_LOBBY.autoJoin = v; _AA_log("OK", "Lobby AutoJoin=" .. tostring(v)) end }, "AutoJoin")
 		left:Slider({ Name = "Auto Start Delay (s)", Default = 5, Minimum = 0, Maximum = 30, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_LOBBY.autoStartDelay = v end }, "AutoStartDelay")
 		left:Toggle({ Name = "Auto Start", Default = false, Callback = function(v) _AA_LOBBY.autoStart = v end }, "AutoStart")
 		local right = tab:Section({ Side = "Right" })
@@ -1159,8 +1159,8 @@ if _AA_Window then
 		local macroDropdown = nil
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Storage" })
-		macroDropdown = left:Dropdown({ Name = "Selected Macro", Search = true, Multi = false, Required = false, Options = _AA_macroList(), Default = 1, Callback = function(v) selectedMacro = v end }, "SelectedMacro")
-		left:Input({ Name = "Macro Name", Placeholder = "macro-name", AcceptedCharacters = function(input) return input:gsub("[^%w%-%_]", "") end, Callback = function(v) _AA_INGAME.recordingName = v end }, "MacroName")
+		macroDropdown = left:Dropdown({ Name = "Selected Macro", Search = true, Multi = false, Required = false, Options = _AA_macroList(), Default = 1, Callback = function(v) selectedMacro = v; _AA_log("OK", "Selected macro: " .. tostring(v)) end }, "SelectedMacro")
+		left:Input({ Name = "Macro Name (then Start Record)", Placeholder = "macro-name", AcceptedCharacters = function(input) return input:gsub("[^%w%-%_]", "") end, Callback = function(v) _AA_INGAME.recordingName = v; _AA_Window:Notify({ Title = "LukihoHub", Description = "Macro name set: " .. tostring(v) .. ". Press Start Record." }) end }, "MacroName")
 		left:Slider({ Name = "Step Delay (s)", Default = 0.25, Minimum = 0.05, Maximum = 2, DisplayMethod = "Value", Precision = 2, Callback = function(v) _AA_INGAME.recordStepDelay = v end }, "StepDelay")
 		left:Toggle({ Name = "Auto Equip Macro Units", Default = false, Callback = function(v)
 			if v and selectedMacro ~= "" then
@@ -1176,14 +1176,24 @@ if _AA_Window then
 		right:Header({ Text = "Record / Play" })
 		right:Button({ Name = "Start Record", Callback = function()
 			if _AA_INGAME.recordingName == "" then _AA_Window:Notify({ Title = "LukihoHub", Description = "Set a macro name first." }); return end
-			_AA_macroStartRecord(_AA_INGAME.recordingName)
+			local ok = _AA_macroStartRecord(_AA_INGAME.recordingName)
+			_AA_Window:Notify({ Title = "LukihoHub", Description = ok and ("Recording: " .. _AA_INGAME.recordingName) or "Already recording." })
 		end })
 		right:Button({ Name = "Stop Record", Callback = function()
 			local r = _AA_macroStopRecord()
 			_AA_Window:Notify({ Title = "LukihoHub", Description = string.format("Saved %s (%d steps)", r.name, r.count) })
+			if macroDropdown and macroDropdown.InsertOptions then
+				macroDropdown:InsertOptions(_AA_macroList())
+			end
 		end })
-		right:Button({ Name = "Play Macro", Callback = function() _AA_macroPlay(selectedMacro) end })
-		right:Button({ Name = "Refresh List", Callback = function() _AA_Window:Notify({ Title = "LukihoHub", Description = "Macros: " .. #_AA_macroList() }) end })
+		right:Button({ Name = "Play Macro", Callback = function()
+			if selectedMacro == "" then _AA_Window:Notify({ Title = "LukihoHub", Description = "Select a macro first." }); return end
+			_AA_macroPlay(selectedMacro)
+		end })
+		right:Button({ Name = "Refresh List", Callback = function()
+			if macroDropdown and macroDropdown.InsertOptions then macroDropdown:InsertOptions(_AA_macroList()) end
+			_AA_Window:Notify({ Title = "LukihoHub", Description = "Macros: " .. #_AA_macroList() })
+		end })
 
 		local ie = tab:Section({ Side = "Left" })
 		ie:Header({ Text = "Import / Export" })
