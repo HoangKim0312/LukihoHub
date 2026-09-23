@@ -292,17 +292,23 @@ end
 -- Name looks like it could belong to the requested kind. Used when the game
 -- doesn't expose data in well-known folders (Anime Adventures often hides
 -- world names deep in nested folders / modules).
-local function _AA_recursiveScan(root, opts)
-	if not root then return nil end
+--
+-- Yielding version: walks the tree across multiple frames so scanning
+-- Workspace (huge in some games) never freezes the executor / UI.
+local function _AA_recursiveScan(root, opts, onDone)
+	if not root then if onDone then onDone() end; return end
+	opts = opts or {}
 	local seen, order = {}, {}
-	local maxDepth = opts.maxDepth or 6
+	local maxDepth = opts.maxDepth or 10
 	local whitelist = opts.whitelist
-	local blacklist = opts.blacklist or { ["_"] = true }
+	local blacklist = opts.blacklist or {}
 	local count = 0
-	local maxCount = opts.maxCount or 200
+	local maxCount = opts.maxCount or 300
+	local yieldEvery = opts.yieldEvery or 250   -- yield every N nodes
+	local frameMs = opts.frameMs or 4           -- ms of work per frame slice
 
 	local function add(name)
-		if not name or name == "" then return end
+		if not name or type(name) ~= "string" or name == "" then return end
 		if blacklist[name] then return end
 		if whitelist then
 			local match = false
@@ -317,20 +323,50 @@ local function _AA_recursiveScan(root, opts)
 		count = count + 1
 	end
 
-	local function walk(node, depth)
-		if count >= maxCount then return end
-		if depth > maxDepth then return end
-		if not node or not node:IsA("Instance") then return end
-		if node:IsA("StringValue") or node:IsA("ObjectValue") then
-			add(node.Value)
-			add(node.Name)
-		end
-		for _, child in node:GetChildren() do
-			walk(child, depth + 1)
+	-- Iterative DFS using an explicit stack so we can pause/resume.
+	local stack = { { node = root, depth = 0 } }
+	local visited = 0
+	local lastYield = os.clock()
+
+	local function tick()
+		if (os.clock() - lastYield) * 1000 >= frameMs then
+			lastYield = os.clock()
+			visited = 0
+			task.wait()
 		end
 	end
 
-	walk(root, 0)
+	while #stack > 0 do
+		if count >= maxCount then break end
+		local frame = table.remove(stack)
+		local node = frame.node
+		local depth = frame.depth
+		if node and depth <= maxDepth then
+			visited = visited + 1
+			if visited > yieldEvery then tick() end
+
+			-- Lua-side type check (cheaper than Instance:IsA)
+			local ok, cls = pcall(function() return node.ClassName end)
+			if ok and (cls == "StringValue" or cls == "ObjectValue") then
+				local v = node.Value
+				if type(v) == "string" then add(v) end
+				add(node.Name)
+			end
+
+			-- Expand children. We avoid expansion of huge transient holders
+			-- (camera, terrain, players) to keep the walk bounded.
+			local skipExpand = cls == "Camera" or cls == "Terrain"
+				or cls == "Workspace"
+			if not skipExpand and depth < maxDepth then
+				local children = node:GetChildren()
+				for i = #children, 1, -1 do
+					table.insert(stack, { node = children[i], depth = depth + 1 })
+				end
+			end
+		end
+	end
+
+	if onDone then onDone(order) end
 	return (#order > 0) and order or nil
 end
 
@@ -344,98 +380,144 @@ local _AA_FALLBACK_MAPS = {
 -- Populate every list we can read from ReplicatedStorage. Anime Adventures
 -- exposes many of these as folders of StringValues (e.g. "Maps", "Portals",
 -- "Codes", "Tiers"). Any list that isn't found keeps its fallback.
+-- All roots we will scan during discovery. Workspace is included but
+-- traversed with a smaller depth because it has many spawned instances.
+-- ServerStorage / ServerScriptService are reachable on many executors and
+-- often contain the authoritative world names.
+local _AA_SCAN_ROOTS = function()
+	local roots = {}
+	for _, name in {
+		"ReplicatedStorage",
+		"ServerStorage",
+		"ServerScriptService",
+		"StarterPlayer",
+		"StarterGui",
+	} do
+		local ok, svc = pcall(game.FindService, game, name)
+		if ok and svc then table.insert(roots, svc) end
+	end
+	-- Workspace is huge; scan only the lobby-relevant subfolders when present.
+	pcall(function()
+		local ws = game:FindService("Workspace")
+		if ws then
+			for _, child in ws:GetChildren() do
+				if child:IsA("Folder") then table.insert(roots, child) end
+			end
+		end
+	end)
+	return roots
+end
+
+-- Run a deep scan across every relevant root, accumulating matches.
+local function _AA_fullScan(whitelist, opts)
+	opts = opts or {}
+	local combined = {}
+	local seen = {}
+	local function add(name)
+		if type(name) ~= "string" or name == "" then return end
+		if seen[name] then return end
+		seen[name] = true
+		table.insert(combined, name)
+	end
+
+	for _, root in _AA_SCAN_ROOTS() do
+		_AA_recursiveScan(root, {
+			maxDepth = opts.maxDepth or 10,
+			maxCount = opts.maxCount or 400,
+			yieldEvery = opts.yieldEvery or 400,
+			frameMs = opts.frameMs or 4,
+			whitelist = whitelist,
+		}, function(order)
+			if order then
+				for _, n in order do add(n) end
+			end
+		end)
+	end
+	return (#combined > 0) and combined or nil
+end
+
 local function _AA_discoverData()
 	pcall(function()
-		local rs = game:FindService("ReplicatedStorage")
-		if not rs then return end
-
-		-- Maps: try direct paths first, then a deep scan, then fallback.
-		local maps = _AA_pick(rs, {
+		-- Maps: try direct paths first, then deep multi-root scan.
+		local maps = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "Maps" }, { "Worlds" }, { "Lobbies" },
 			{ "Data", "Maps" }, { "Data", "Worlds" },
 		})
 		if not maps then
-			maps = _AA_recursiveScan(rs, {
-				maxDepth = 8,
-				maxCount = 50,
-				whitelist = { "planet", "walled", "snowy", "sand", "navy",
-					"naruto", "demon", "hero", "jujutsu", "bleach", "one piece",
-					"dragon", "hunter", "jojo", "fairy", "deadly", "clover",
-					"halloween", "christmas", "april", "namek", "dressrosa",
-					"marineford", "sunraku", "map", "world", "story" },
-			})
+			maps = _AA_fullScan({
+				"planet", "walled", "snowy", "sand", "navy",
+				"naruto", "demon", "hero", "jujutsu", "bleach", "one piece",
+				"dragon", "hunter", "jojo", "fairy", "deadly", "clover",
+				"halloween", "christmas", "april", "namek", "dressrosa",
+				"marineford", "sunraku", "map", "world", "story",
+				"cursed", "berserk", "pirate", "shinobi", "spirit",
+				"shadow", "mugen", "ranked", "infinite", "raid",
+			}, { maxDepth = 12, maxCount = 500 })
 		end
 		if maps then _AA_DATA.MAPS = maps end
 		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = _AA_FALLBACK_MAPS end
 
-		local portals = _AA_pick(rs, {
+		-- Portals
+		local portals = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "Portals" }, { "Portal" }, { "Data", "Portals" },
 		})
 		if not portals then
-			portals = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				maxCount = 60,
-				whitelist = { "portal" },
-			})
+			portals = _AA_fullScan({ "portal" }, { maxDepth = 10, maxCount = 600 })
 		end
 		if portals then _AA_DATA.PORTALS = portals end
 		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
 
-		local mods = _AA_pick(rs, {
+		-- Modifiers
+		local mods = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
 		})
 		if not mods then
-			mods = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				whitelist = { "hard", "insane", "chilly", "foggy", "burning",
-					"modifier" },
-			})
+			mods = _AA_fullScan({
+				"hard", "insane", "chilly", "foggy", "burning",
+				"modifier", "challenge", "sweltering", "windy",
+			}, { maxDepth = 10 })
 		end
 		if mods then _AA_DATA.MODIFIERS = mods end
 
-		local buffs = _AA_pick(rs, {
+		-- Buff / Debuff cards
+		local buffs = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
 		})
 		if not buffs then
-			buffs = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				whitelist = { "buff", "damage", "gold", "range", "cooldown",
-					"slot", "speed", "card" },
-			})
+			buffs = _AA_fullScan({
+				"buff", "damage", "gold", "range", "cooldown",
+				"slot", "speed", "card", "boost",
+			}, { maxDepth = 10 })
 		end
 		if buffs then _AA_DATA.BUFF_CARDS = buffs end
 
-		local debuffs = _AA_pick(rs, {
+		local debuffs = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
 		})
 		if not debuffs then
-			debuffs = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				whitelist = { "debuff", "half", "slow", "reduce", "increase", "less" },
-			})
+			debuffs = _AA_fullScan({
+				"debuff", "half", "slow", "reduce", "increase", "less",
+			}, { maxDepth = 10 })
 		end
 		if debuffs then _AA_DATA.DEBUFF_CARDS = debuffs end
 
-		local codes = _AA_pick(rs, {
+		-- Codes
+		local codes = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
 		})
 		if not codes then
-			codes = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				maxCount = 40,
-				whitelist = { "code", "redeem" },
-			})
+			codes = _AA_fullScan({ "code", "redeem" }, { maxDepth = 10, maxCount = 200 })
 		end
 		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
 
-		local tiers = _AA_pick(rs, {
+		-- Tiers
+		local tiers = _AA_pick(game:FindService("ReplicatedStorage"), {
 			{ "Tiers" }, { "Data", "Tiers" },
 		})
 		if not tiers then
-			tiers = _AA_recursiveScan(rs, {
-				maxDepth = 6,
-				whitelist = { "tier", "t1", "t2", "t3", "t4", "t5" },
-			})
+			tiers = _AA_fullScan({
+				"tier", "t1", "t2", "t3", "t4", "t5", "t6",
+			}, { maxDepth = 10 })
 		end
 		if tiers then _AA_DATA.TIERS = tiers end
 
@@ -446,12 +528,9 @@ local function _AA_discoverData()
 	end)
 end
 
--- Re-scan on demand (used by the "Rescan Maps" button).
-local _AA_RESCAN_CONN
+-- Manual rescan still exists for edge cases where the player joins late.
 function _AA_rescanData()
 	pcall(function()
-		-- Wipe everything that depends on discovery so the deep scan can
-		-- rebuild them with the actual current data.
 		_AA_DATA.MAPS = {}
 		_AA_DATA.PORTALS = {}
 		_AA_DATA.MODIFIERS = {}
@@ -463,24 +542,6 @@ function _AA_rescanData()
 	end)
 end
 
-		local codes = _AA_pick(rs, {
-			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
-		})
-		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
-
-		local tiers = _AA_pick(rs, {
-			{ "Tiers" }, { "Data", "Tiers" },
-		})
-		if tiers then _AA_DATA.TIERS = tiers end
-
-		_AA_log("OK", string.format(
-			"Discovered: %d maps, %d portals, %d modifiers, %d buffs, %d debuffs, %d codes, %d tiers",
-			#_AA_DATA.MAPS, #_AA_DATA.PORTALS, #_AA_DATA.MODIFIERS,
-			#_AA_DATA.BUFF_CARDS, #_AA_DATA.DEBUFF_CARDS, #_AA_DATA.KNOWN_CODES, #_AA_DATA.TIERS))
-	end)
-end
-
-----------------------------------------------------------------
 ----------------------------------------------------------------
 local _AA_LOBBY = {
 	autoJoin = false,
