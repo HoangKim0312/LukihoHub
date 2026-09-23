@@ -10,7 +10,7 @@
 -- without an F9 console (some executors swallow stderr but keep stdout).
 
 local function _boot()
-	print("[Lukiho] loader v" .. tostring(_VERSION) .. " starting (placeId=" .. tostring(game.PlaceId) .. ")")
+	print("[Lukiho] loader starting (gameId=" .. tostring(game.GameId) .. " placeId=" .. tostring(game.PlaceId) .. ")")
 
 	if not game:IsLoaded() then
 		game.Loaded:Wait()
