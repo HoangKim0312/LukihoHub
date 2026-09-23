@@ -812,6 +812,7 @@ local _AA_MISC = {
 	hideMap = false,
 	hideName = false,
 	fakeOutfit = false,
+	fakeName = "",
 	autoReconnect = false,
 	showTakedowns = true,
 	coloredTakedowns = false,
@@ -821,6 +822,54 @@ local _AA_MISC = {
 	autoClaimDaily = true,
 	autoClaimPlayerLevel = true,
 }
+
+-- Helpers around the local player so we can show real identity in UI and
+-- apply name-spoofing on top of the character.
+local function _AA_localPlayerName()  return Players.LocalPlayer and Players.LocalPlayer.Name or "?" end
+local function _AA_localDisplayName() return Players.LocalPlayer and Players.LocalPlayer.DisplayName or "?" end
+local function _AA_localUserId()     return Players.LocalPlayer and Players.LocalPlayer.UserId or 0 end
+
+-- Apply / clear a fake display-name billboard over the player's head.
+-- Anime Adventures uses its own head GUI; we attach ours above so ours shows.
+local _AA_fakeNameBillboard
+local function _AA_applyFakeName(text)
+	local lp = Players.LocalPlayer
+	if not lp then return end
+	local char = lp.Character or lp.CharacterAdded:Wait()
+	local head = char:WaitForChild("Head", 10)
+	if not head then return end
+
+	local function clear()
+		if _AA_fakeNameBillboard then
+			pcall(function() _AA_fakeNameBillboard:Destroy() end)
+			_AA_fakeNameBillboard = nil
+		end
+	end
+
+	clear()
+	if not text or text == "" then return end
+
+	local bbg = Instance.new("BillboardGui")
+	bbg.Name = "LukihoFakeName"
+	bbg.Size = UDim2.new(6, 0, 1.2, 0)
+	bbg.StudsOffset = Vector3.new(0, 2.5, 0)
+	bbg.AlwaysOnTop = true
+	bbg.LightInfluence = 0
+	bbg.Parent = head
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.TextStrokeTransparency = 0
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.Text = text
+	label.Parent = bbg
+
+	_AA_fakeNameBillboard = bbg
+end
 
 local function _AA_postWebhook(url, payload)
 	if url == nil or url == "" then return end
@@ -894,11 +943,26 @@ end
 local function _AA_setFakeOutfit(enabled)
 	_AA_MISC.fakeOutfit = enabled
 	pcall(function()
-		local char = Players.LocalPlayer.Character
+		local lp = Players.LocalPlayer
+		if not lp then return end
+		local char = lp.Character
 		if not char then return end
 		for _, part in char:GetDescendants() do
 			if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then part.Transparency = if enabled then 1 else 0 end
 		end
+	end)
+end
+
+-- Re-apply fake name whenever the character respawns.
+do
+	local function wire(name)
+		_AA_applyFakeName(name)
+	end
+	task.spawn(function()
+		local lp = Players.LocalPlayer
+		if not lp then return end
+		wire(_AA_MISC.fakeName)
+		lp.CharacterAdded:Connect(function() task.wait(0.3); wire(_AA_MISC.fakeName) end)
 	end)
 end
 
@@ -1377,6 +1441,7 @@ _AA_build("Lobby", function()
 		right:Toggle({ Name = "Hide Map", Default = false, Callback = function(v) _AA_setMapHidden(v) end }, "HideMap")
 		right:Toggle({ Name = "Hide Name", Default = false, Callback = function(v) _AA_setNamesHidden(v) end }, "HideName")
 		right:Toggle({ Name = "Fake Outfit", Default = false, Callback = function(v) _AA_setFakeOutfit(v) end }, "FakeOutfit")
+		right:Input({ Name = "Fake Display Name", Placeholder = "leave empty to clear", AcceptedCharacters = "All", Callback = function(v) _AA_MISC.fakeName = v; _AA_applyFakeName(v) end }, "FakeName")
 		right:Toggle({ Name = "Auto Try Reconnect", Default = false, Callback = function(v) _AA_MISC.autoReconnect = v end }, "AutoReconnect")
 		right:Slider({ Name = "Set FPS (0=off)", Default = 0, Minimum = 0, Maximum = 240, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_setFps(v) end }, "SetFPS")
 		right:Toggle({ Name = "Colored Takedowns", Default = false, Callback = function(v) _AA_MISC.coloredTakedowns = v end }, "ColoredTakedowns")
@@ -1416,9 +1481,88 @@ function _AA_unload()
 	for _, c in _AA_connections do pcall(function() c:Disconnect() end) end
 	if _AA_Window then pcall(function() _AA_Window:Unload() end) end
 	if _AA_debugGui and _AA_debugGui.gui then pcall(function() _AA_debugGui.gui:Destroy() end) end
+	if _AA_infoGui and _AA_infoGui.gui then pcall(function() _AA_infoGui.gui:Destroy() end) end
+	if _AA_fakeNameBillboard then pcall(function() _AA_fakeNameBillboard:Destroy() end) end
 	_G.LukihoHubUnload = nil
 end
 _G.LukihoHubUnload = _AA_unload
 _G._AA_HUB_VERSION = _AA_HUB_VERSION
+
+-- Bottom-left info panel showing real local-player identity. Updates if the
+-- player swaps accounts or this hub re-runs after a teleport.
+local _AA_infoGui
+local function _AA_refreshInfoPanel()
+	pcall(function()
+		if not _AA_infoGui or not _AA_infoGui.gui then
+			local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+			if not pg then return end
+			local gui = Instance.new("ScreenGui")
+			gui.Name = "LukihoInfoPanel"
+			gui.IgnoreGuiInset = true
+			gui.DisplayOrder = 9999
+			gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+			gui.ResetOnSpawn = false
+			gui.Parent = pg
+
+			local frame = Instance.new("Frame")
+			frame.Name = "Info"
+			frame.AnchorPoint = Vector2.new(0, 1)
+			frame.Position = UDim2.new(0, 8, 1, -8)
+			frame.Size = UDim2.fromOffset(220, 56)
+			frame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+			frame.BackgroundTransparency = 0.25
+			frame.BorderSizePixel = 0
+			frame.Parent = gui
+			Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+			local title = Instance.new("TextLabel")
+			title.Name = "Title"
+			title.Size = UDim2.new(1, -16, 0, 18)
+			title.Position = UDim2.fromOffset(8, 4)
+			title.BackgroundTransparency = 1
+			title.Font = Enum.Font.GothamBold
+			title.TextColor3 = Color3.fromRGB(120, 200, 255)
+			title.TextSize = 12
+			title.TextXAlignment = Enum.TextXAlignment.Left
+			title.Text = "LukihoHub · Player"
+			title.Parent = frame
+
+			local body = Instance.new("TextLabel")
+			body.Name = "Body"
+			body.Size = UDim2.new(1, -16, 1, -22)
+			body.Position = UDim2.fromOffset(8, 22)
+			body.BackgroundTransparency = 1
+			body.Font = Enum.Font.Gotham
+			body.TextColor3 = Color3.fromRGB(230, 230, 230)
+			body.TextSize = 12
+			body.TextXAlignment = Enum.TextXAlignment.Left
+			body.TextYAlignment = Enum.TextYAlignment.Top
+			body.TextWrapped = true
+			body.Parent = frame
+
+			_AA_infoGui = { gui = gui, frame = frame, body = body }
+		end
+		local lp = Players.LocalPlayer
+		if not lp then return end
+		local fake = _AA_MISC.fakeName
+		local lines = {
+			"Name:         " .. tostring(lp.Name),
+			"DisplayName:  " .. tostring(lp.DisplayName),
+			"UserId:       " .. tostring(lp.UserId),
+			"AccountAge:   " .. tostring(lp.AccountAge) .. " days",
+		}
+		if fake and fake ~= "" then table.insert(lines, "Fake Name ON: " .. fake) end
+		_AA_infoGui.body.Text = table.concat(lines, "\n")
+	end)
+end
+
+do
+	_AA_refreshInfoPanel()
+	local lp = Players.LocalPlayer
+	if lp then
+		lp:GetPropertyChangedSignal("DisplayName"):Connect(_AA_refreshInfoPanel)
+		lp:GetPropertyChangedSignal("Name"):Connect(_AA_refreshInfoPanel)
+	end
+end
 
 _AA_log("OK", string.format("hub ready (place=%d, ui=%s)", game.PlaceId, _AA_Window and "loaded" or "missing"))
