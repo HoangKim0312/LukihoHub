@@ -804,8 +804,8 @@ local function _AA_tryReconnect()
 	pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
 end
 
-_AA_on(Players.LocalPlayer.PlayerRemoving, function()
-	if _AA_MISC.autoReconnect then
+_AA_on(Players.PlayerRemoving, function(player)
+	if player == Players.LocalPlayer and _AA_MISC.autoReconnect then
 		task.delay(2, function() pcall(function() TeleportService:Teleport(game.PlaceId) end) end)
 	end
 end)
