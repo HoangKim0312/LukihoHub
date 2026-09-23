@@ -170,78 +170,7 @@ local function _AA_invoke(name, ...)
 	if not ok then
 		warn(string.format("[LukihoHub] invoke(%s) failed: %s", name, tostring(result)))
 	end
-	return result
-end
-
--- Discover map / portal names dynamically from common ReplicatedStorage folders.
--- Falls back to place names already cached in the dropdown.
-local _AA_DISCOVERED = false
-local function _AA_discoverData()
-	if _AA_DISCOVERED then return end
-	_AA_DISCOVERED = true
-	pcall(function()
-		local rs = game:FindService("ReplicatedStorage")
-		if not rs then return end
-		-- Anime Adventures commonly exposes worlds as StringValues under
-		-- ReplicatedStorage.Maps (folder of StringValues) or as objects under
-		-- "Lobbies". Try a few common paths and dedupe into _AA_DATA.
-		local candidateRoots = {
-			rs:FindFirstChild("Maps"),
-			rs:FindFirstChild("Worlds"),
-			rs:FindFirstChild("Lobbies"),
-			rs:FindFirstChild("Data") and rs.Data:FindFirstChild("Maps"),
-		}
-		local seen, order = {}, {}
-		for _, root in candidateRoots do
-			if root and root:IsA("Instance") then
-				if root:IsA("Folder") or root:IsA("Configuration") then
-					for _, child in root:GetChildren() do
-						local name
-						if child:IsA("StringValue") or child:IsA("ObjectValue") then
-							name = child.Value
-						elseif child:IsA("ModuleScript") or child:IsA("Folder") then
-							name = child.Name
-						end
-						if name and name ~= "" and not seen[name] then
-							seen[name] = true
-							table.insert(order, name)
-						end
-					end
-				elseif root:IsA("StringValue") then
-					local n = root.Value
-					if n and n ~= "" and not seen[n] then seen[n] = true; table.insert(order, n) end
-				end
-			end
-		end
-		if #order > 0 then
-			_AA_DATA.MAPS = order
-			_AA_log("OK", string.format("Discovered %d maps: %s", #order, table.concat(order, ", ")))
-		else
-			_AA_DATA.MAPS = { "Story Mode" }
-			_AA_log("WARN", "Map list empty after scan — using fallback 'Story Mode'")
-		end
-
-		-- Portals: scan common folder names ending in _portal.
-		local portalRoots = { rs:FindFirstChild("Portals"), rs:FindFirstChild("Portal") }
-		local pseen, porder = {}, {}
-		for _, root in portalRoots do
-			if root and root:IsA("Instance") then
-				for _, child in root:GetChildren() do
-					local n = child.Name
-					if n and n ~= "" and not pseen[n] then
-						pseen[n] = true
-						table.insert(porder, n)
-					end
-				end
-			end
-		end
-		if #porder > 0 then
-			_AA_DATA.PORTALS = porder
-			_AA_log("OK", string.format("Discovered %d portals", #porder))
-		else
-			_AA_DATA.PORTALS = { "default_portal" }
-		end
-	end)
+		return result
 end
 
 local function _AA_fire(name, ...)
@@ -302,13 +231,16 @@ end
 -- 4. STATIC DATA
 ----------------------------------------------------------------
 local _AA_DATA = {
+	-- Static lists (these are usually encoded into the remotes in Anime
+	-- Adventures and aren't exposed in ReplicatedStorage, but we keep sane
+	-- fallbacks in case the discover step finds nothing).
 	DIFFICULTIES = { "Easy", "Normal", "Hard", "Insane" },
 	JOIN_MODES   = { "Story", "Infinite", "LegendStage", "Raid" },
-	-- MAPS / ACTS / PORTALS are populated dynamically from ReplicatedStorage.
 	MAPS = {},
 	ACTS  = { "Act 1", "Act 2", "Act 3", "Act 4", "Act 5", "Act 6" },
 	PORTALS = {},
 	TIERS = { "T1", "T2", "T3", "T4", "T5" },
+	MODIFIERS = { "Hard", "Insane", "Chilly", "Foggy", "Burning" },
 	BUFF_CARDS = {
 		"Double Damage", "Gold Boost", "Range Boost",
 		"Cooldown Reduction", "Extra Slot", "Speed Boost",
@@ -319,11 +251,98 @@ local _AA_DATA = {
 	},
 	SKIN_RARITIES = { "Common", "Rare", "Epic", "Legendary", "Mythic" },
 	CAPSULE_TYPES = { "Standard", "Premium", "Event" },
-	KNOWN_CODES = {
-		"SORRYFORSHUTDOWN", "NEVERDIE", "RAIDNARUTO",
-		"RAIDMARINEFORD", "HEROIC", "SUBTOSUBTOMETAVERSE",
-	},
+	KNOWN_CODES = {},
 }
+
+local _AA_DISCOVERED = false
+local function _AA_collectNames(root)
+	if not root or not root:IsA("Instance") then return nil end
+	local seen, order = {}, {}
+	local function add(n)
+		if type(n) == "string" and n ~= "" and not seen[n] then
+			seen[n] = true
+			table.insert(order, n)
+		end
+	end
+	if root:IsA("Folder") or root:IsA("Configuration") or root:IsA("ReplicatedFolder") then
+		for _, child in root:GetChildren() do
+			if child:IsA("StringValue") or child:IsA("ObjectValue") then
+				add(child.Value)
+			elseif child:IsA("ModuleScript") or child:IsA("Folder") or child:IsA("Script") then
+				add(child.Name)
+			end
+		end
+	elseif root:IsA("StringValue") then
+		add(root.Value)
+	end
+	return (#order > 0) and order or nil
+end
+
+-- Walk a list of child-name paths and return the first non-empty result.
+local function _AA_pick(rs, paths)
+	for _, path in paths do
+		local node = rs
+		for _, p in path do node = node and node:FindFirstChild(p) end
+		local got = _AA_collectNames(node)
+		if got then return got end
+	end
+	return nil
+end
+
+-- Populate every list we can read from ReplicatedStorage. Anime Adventures
+-- exposes many of these as folders of StringValues (e.g. "Maps", "Portals",
+-- "Codes", "Tiers"). Any list that isn't found keeps its fallback.
+local function _AA_discoverData()
+	if _AA_DISCOVERED then return end
+	_AA_DISCOVERED = true
+	pcall(function()
+		local rs = game:FindService("ReplicatedStorage")
+		if not rs then return end
+
+		local maps = _AA_pick(rs, {
+			{ "Maps" }, { "Worlds" }, { "Lobbies" },
+			{ "Data", "Maps" }, { "Data", "Worlds" },
+		})
+		if maps then _AA_DATA.MAPS = maps end
+		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = { "Story Mode" } end
+
+		local portals = _AA_pick(rs, {
+			{ "Portals" }, { "Portal" }, { "Data", "Portals" },
+		})
+		if portals then _AA_DATA.PORTALS = portals end
+		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
+
+		local mods = _AA_pick(rs, {
+			{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
+		})
+		if mods then _AA_DATA.MODIFIERS = mods end
+
+		local buffs = _AA_pick(rs, {
+			{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
+		})
+		if buffs then _AA_DATA.BUFF_CARDS = buffs end
+
+		local debuffs = _AA_pick(rs, {
+			{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
+		})
+		if debuffs then _AA_DATA.DEBUFF_CARDS = debuffs end
+
+		local codes = _AA_pick(rs, {
+			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
+		})
+		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
+
+		local tiers = _AA_pick(rs, {
+			{ "Tiers" }, { "Data", "Tiers" },
+		})
+		if tiers then _AA_DATA.TIERS = tiers end
+
+		_AA_log("OK", string.format(
+			"Discovered: %d maps, %d portals, %d modifiers, %d buffs, %d debuffs, %d codes, %d tiers",
+			#_AA_DATA.MAPS, #_AA_DATA.PORTALS, #_AA_DATA.MODIFIERS,
+			#_AA_DATA.BUFF_CARDS, #_AA_DATA.DEBUFF_CARDS, #_AA_DATA.KNOWN_CODES, #_AA_DATA.TIERS))
+	end)
+end
 
 ----------------------------------------------------------------
 -- 5. LOBBY STATE
@@ -334,7 +353,7 @@ local _AA_LOBBY = {
 	autoPortal = false,
 	autoJoinPlayer = false,
 	joinMode = "Story",
-	selectedMap = "Naruto",
+	selectedMap = "",
 	selectedAct = "Act 1",
 	difficulty = "Normal",
 	friendsOnly = false,
@@ -342,7 +361,7 @@ local _AA_LOBBY = {
 	autoStartDelay = 5,
 	ignoreWorlds = {},
 	ignoreModifiers = {},
-	selectedPortal = "final_disc",
+	selectedPortal = "",
 	portalDifficulty = "Normal",
 	portalTiers = {},
 	ignoreDmgBonus = false,
@@ -538,6 +557,15 @@ local function _AA_listFieldUnits()
 end
 
 local function _AA_isFarm(unit)
+	-- Prefer the explicit attribute the server sets (e.g. "IsFarm", "Farm"),
+	-- otherwise fall back to a name-based heuristic.
+	local attr
+	for _, k in { "IsFarm", "isFarm", "Farm", "is_farm" } do
+		attr = unit:GetAttribute(k)
+		if attr ~= nil then break end
+	end
+	if type(attr) == "boolean" then return attr end
+	if type(attr) == "string" then return string.lower(attr) == "true" end
 	local id = unit:GetAttribute("unit_id") or unit.Name or ""
 	return string.find(string.lower(id), "farm", 1, true) ~= nil
 end
@@ -1155,7 +1183,7 @@ _AA_build("Lobby", function()
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Auto Join Map" })
 		left:Dropdown({ Name = "Join Mode", Search = false, Multi = false, Required = false, Options = _AA_DATA.JOIN_MODES, Default = 1, Callback = function(v) _AA_LOBBY.joinMode = v end }, "JoinMode")
-		left:Dropdown({ Name = "Map", Search = true, Multi = false, Required = false, Options = _AA_DATA.MAPS, Default = 1, Callback = function(v) _AA_LOBBY.selectedMap = v end }, "Map")
+		left:Dropdown({ Name = "Map", Search = true, Multi = false, Required = false, Options = _AA_DATA.MAPS, Default = _AA_DATA.MAPS[1] or "", Callback = function(v) _AA_LOBBY.selectedMap = v end }, "Map")
 		left:Dropdown({ Name = "Act", Search = false, Multi = false, Required = false, Options = _AA_DATA.ACTS, Default = 1, Callback = function(v) _AA_LOBBY.selectedAct = v end }, "Act")
 		left:Dropdown({ Name = "Difficulty", Search = false, Multi = false, Required = false, Options = _AA_DATA.DIFFICULTIES, Default = 2, Callback = function(v) _AA_LOBBY.difficulty = v end }, "Difficulty")
 		left:Toggle({ Name = "Friends Only", Default = false, Callback = function(v) _AA_LOBBY.friendsOnly = v end }, "FriendsOnly")
@@ -1165,12 +1193,12 @@ _AA_build("Lobby", function()
 		local right = tab:Section({ Side = "Right" })
 		right:Header({ Text = "Auto Challenge" })
 		right:Dropdown({ Name = "Ignore Worlds", Search = true, Multi = true, Required = false, Options = _AA_DATA.MAPS, Default = {}, Callback = function(v) _AA_LOBBY.ignoreWorlds = v end }, "IgnoreWorlds")
-		right:Dropdown({ Name = "Ignore Modifiers", Search = true, Multi = true, Required = false, Options = { "Hard", "Insane", "Chilly", "Foggy", "Burning" }, Default = {}, Callback = function(v) _AA_LOBBY.ignoreModifiers = v end }, "IgnoreModifiers")
+		right:Dropdown({ Name = "Ignore Modifiers", Search = true, Multi = true, Required = false, Options = _AA_DATA.MODIFIERS, Default = {}, Callback = function(v) _AA_LOBBY.ignoreModifiers = v end }, "IgnoreModifiers")
 		right:Toggle({ Name = "Auto Challenge", Default = false, Callback = function(v) _AA_LOBBY.autoChallenge = v end }, "AutoChallenge")
 
 		local portal = tab:Section({ Side = "Left" })
 		portal:Header({ Text = "Auto Portal" })
-		portal:Dropdown({ Name = "Select Portal", Search = true, Multi = false, Required = false, Options = _AA_DATA.PORTALS, Default = 1, Callback = function(v) _AA_LOBBY.selectedPortal = v end }, "Portal")
+		portal:Dropdown({ Name = "Select Portal", Search = true, Multi = false, Required = false, Options = _AA_DATA.PORTALS, Default = _AA_DATA.PORTALS[1] or "", Callback = function(v) _AA_LOBBY.selectedPortal = v end }, "Portal")
 		portal:Dropdown({ Name = "Difficulty", Search = false, Multi = false, Required = false, Options = _AA_DATA.DIFFICULTIES, Default = 2, Callback = function(v) _AA_LOBBY.portalDifficulty = v end }, "PortalDifficulty")
 		portal:Dropdown({ Name = "Tiers", Search = false, Multi = true, Required = false, Options = _AA_DATA.TIERS, Default = { "T1", "T2" }, Callback = function(v) _AA_LOBBY.portalTiers = v end }, "PortalTiers")
 		portal:Toggle({ Name = "Ignore DMG Bonus", Default = false, Callback = function(v) _AA_LOBBY.ignoreDmgBonus = v end }, "IgnoreDmg")
