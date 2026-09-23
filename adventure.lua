@@ -254,7 +254,20 @@ local _AA_DATA = {
 	KNOWN_CODES = {},
 }
 
-local _AA_collectNames(root)
+-- Walk a list of child-name paths and return the first non-empty result.
+local function _AA_pick(rs, paths)
+	for _, path in paths do
+		local node = rs
+		for _, p in path do node = node and node:FindFirstChild(p) end
+		local got = _AA_collectNamesFromFolder(node)
+		if got then return got end
+	end
+	return nil
+end
+
+-- Collect display strings from a folder of StringValues / ObjectValues, or
+-- from a ModuleScript/Localscript folder (using child Name as label).
+local function _AA_collectNamesFromFolder(root)
 	if not root or not root:IsA("Instance") then return nil end
 	local seen, order = {}, {}
 	local function add(n)
@@ -275,17 +288,6 @@ local _AA_collectNames(root)
 		add(root.Value)
 	end
 	return (#order > 0) and order or nil
-end
-
--- Walk a list of child-name paths and return the first non-empty result.
-local function _AA_pick(rs, paths)
-	for _, path in paths do
-		local node = rs
-		for _, p in path do node = node and node:FindFirstChild(p) end
-		local got = _AA_collectNames(node)
-		if got then return got end
-	end
-	return nil
 end
 
 -- Recursively walk a tree collecting StringValue/ObjectValue values whose
@@ -427,7 +429,11 @@ end
 local _AA_DATA_ROOTS = {
 	-- Each entry: list of path segments relative to ReplicatedStorage (or
 	-- ServerStorage mirror) pointing at an aggregator ModuleScript.
+	-- Both the modern aggregator (e.g. `src.Data.Maps.Maps`) and the older
+	-- per-category `*_Pretesting` module are tried — different AA versions
+	-- ship different layouts.
 	aggregators = {
+		-- Modern (current AA) aggregator modules
 		{ name = "Maps",        path = { "src", "Data", "Maps",        "Maps"        } },
 		{ name = "Levels",      path = { "src", "Data", "Levels",      "Levels"      } },
 		{ name = "Buffs",       path = { "src", "Data", "Buffs",       "Buffs"       } },
@@ -440,6 +446,17 @@ local _AA_DATA_ROOTS = {
 		{ name = "Missions",    path = { "src", "Data", "Missions",    "Missions"    } },
 		{ name = "BattlePass",  path = { "src", "Data", "BattlePass",  "BattlePass"  } },
 		{ name = "Emotes",      path = { "src", "Data", "Emotes",      "Emotes"      } },
+		-- Legacy `_Pretesting` modules (older AA versions / mirror dumps)
+		{ name = "Maps",        path = { "src", "data", "maps",        "Maps_Pretesting"        } },
+		{ name = "Portals",     path = { "src", "data", "portals",     "Portals_Pretesting"     } },
+		{ name = "Modifiers",   path = { "src", "data", "modifiers",   "Modifiers_Pretesting"   } },
+		{ name = "Buffs",       path = { "src", "data", "buffs",       "Buffs_Pretesting"       } },
+		{ name = "Debuffs",     path = { "src", "data", "debuffs",     "Debuffs_Pretesting"     } },
+		{ name = "Codes",       path = { "src", "data", "codes",       "Codes_Pretesting"       } },
+		{ name = "Tiers",       path = { "src", "data", "tiers",       "Tiers_Pretesting"       } },
+		{ name = "Worlds",      path = { "src", "data", "worlds",      "Worlds_Pretesting"      } },
+		{ name = "Stages",      path = { "src", "data", "stages",      "Stages_Pretesting"      } },
+		{ name = "Difficulties",path = { "src", "data", "difficulties","Difficulties_Pretesting" } },
 	},
 	-- Constant/enum modules that don't expose a .name field — we pluck the
 	-- specific fields listed in `fields` instead of every entry's name.
@@ -453,7 +470,8 @@ local _AA_DATA_ROOTS = {
 	},
 	-- Folder roots we walk, requiring every ModuleScript child and collecting
 	-- its names. Each folder is one category; we only pick names that match
-	-- the category's `nameKey` heuristic (e.g. portals have "_portal" id).
+	-- the category's predicate (e.g. portals have "_portal" id or
+	-- `_portal_only_level` field).
 	folderScans = {
 		{ name = "Portals_AsLevels", folder = { "src", "Data", "Levels" } },
 		{ name = "Portals_AsItems",  folder = { "src", "Data", "Items", "UniqueItems", "Portals" } },
@@ -627,18 +645,26 @@ end
 local function _AA_discoverData()
 	pcall(function()
 		-- All authoritative AA data is Lua tables inside ModuleScripts under
-		-- ReplicatedStorage.src.Data.*. We try the verified aggregator paths
-		-- first, then constant modules, then folder walks, then fall back to
-		-- a deep instance scan, then to a hardcoded list.
+		-- ReplicatedStorage.src.Data.* (modern) or src.data.*_Pretesting
+		-- (legacy). Try every matching aggregator and merge results.
+
+		-- Helper: require every aggregator whose `name` matches `key` and
+		-- return the union of all .name fields found.
+		local function requireByKey(key)
+			local merged = {}
+			for _, entry in _AA_DATA_ROOTS.aggregators do
+				if entry.name == key then
+					local names = _AA_requireAggregator(entry)
+					if names then
+						for _, n in names do merged[#merged + 1] = n end
+					end
+				end
+			end
+			return (#merged > 0) and _AA_dedupe(merged) or nil
+		end
 
 		-- ----- Maps (world lobbies) -----
-		local maps
-		for _, entry in _AA_DATA_ROOTS.aggregators do
-			if entry.name == "Maps" then
-				maps = _AA_requireAggregator(entry)
-				if maps and #maps > 0 then break end
-			end
-		end
+		local maps = requireByKey("Maps")
 		if not maps then
 			maps = _AA_pick(game:FindService("ReplicatedStorage"), {
 				{ "Maps" }, { "Worlds" }, { "Lobbies" },
@@ -660,22 +686,27 @@ local function _AA_discoverData()
 		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = _AA_FALLBACK_MAPS end
 
 		-- ----- Portals -----
-		-- Two storage strategies: portal-as-level (Levels_<World>_Portals.lua)
-		-- and portal-as-item (Items_Portals<World>.lua under
-		-- src.Data.Items.UniqueItems.Portals). Walk both folders.
-		local portals = _AA_requireFolder(
-			{ "src", "Data", "Levels" },
-			function(v) return v._portal_only_level == true
-				or (type(v.id) == "string" and v.id:find("_portal", 1, true) ~= nil)
-			end)
-		local portals2 = _AA_requireFolder(
-			{ "src", "Data", "Items", "UniqueItems", "Portals" },
-			function(v) return type(v._unique_portal_levels) == "table" end)
-		local merged = {}
-		if portals then for _, n in portals do merged[#merged + 1] = n end end
-		if portals2 then for _, n in portals2 do merged[#merged + 1] = n end end
-		portals = _AA_dedupe(merged)
-		if #portals == 0 then
+		-- Storage strategies:
+		--   (a) Modern: walk `src.Data.Levels` for entries with
+		--       _portal_only_level / "_portal" in id; walk
+		--       `src.Data.Items.UniqueItems.Portals` for _unique_portal_levels.
+		--   (b) Legacy: require `src.data.portals.Portals_Pretesting` aggregator.
+		local portals = requireByKey("Portals")
+		if not portals then
+			local pLevels = _AA_requireFolder(
+				{ "src", "Data", "Levels" },
+				function(v) return v._portal_only_level == true
+					or (type(v.id) == "string" and v.id:find("_portal", 1, true) ~= nil)
+				end)
+			local pItems = _AA_requireFolder(
+				{ "src", "Data", "Items", "UniqueItems", "Portals" },
+				function(v) return type(v._unique_portal_levels) == "table" end)
+			local merged = {}
+			if pLevels then for _, n in pLevels do merged[#merged + 1] = n end end
+			if pItems  then for _, n in pItems  do merged[#merged + 1] = n end end
+			portals = _AA_dedupe(merged)
+		end
+		if not portals or #portals == 0 then
 			portals = _AA_pick(game:FindService("ReplicatedStorage"), {
 				{ "Portals" }, { "Portal" }, { "Data", "Portals" },
 			})
@@ -687,22 +718,20 @@ local function _AA_discoverData()
 		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
 
 		-- ----- Modifiers (Chill/Foggy/Burning) -----
-		-- AA does not ship a data module for these. They appear to be
-		-- runtime/post-process effects. We expose an enum fallback so the
-		-- dropdown still has something to pick from.
-		_AA_DATA.MODIFIERS = {
-			"Normal", "Hard", "Insane", "Chilly", "Foggy", "Burning",
-			"Sweltering", "Windy", "Dusk", "Dawn",
-		}
-
-		-- ----- Buffs (combat status effects from src.Data.Buffs.Buffs) -----
-		local buffs
-		for _, entry in _AA_DATA_ROOTS.aggregators do
-			if entry.name == "Buffs" then
-				buffs = _AA_requireAggregator(entry)
-				if buffs and #buffs > 0 then break end
-			end
+		-- AA does not always ship a module for these; modern builds hide them
+		-- server-side and legacy builds use Modifiers_Pretesting.
+		local mods = requireByKey("Modifiers")
+		if mods and #mods > 0 then
+			_AA_DATA.MODIFIERS = mods
+		else
+			_AA_DATA.MODIFIERS = {
+				"Normal", "Hard", "Insane", "Chilly", "Foggy", "Burning",
+				"Sweltering", "Windy", "Dusk", "Dawn",
+			}
 		end
+
+		-- ----- Buffs (combat status / card pre-match) -----
+		local buffs = requireByKey("Buffs")
 		if not buffs then
 			buffs = _AA_pick(game:FindService("ReplicatedStorage"), {
 				{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" },
@@ -722,18 +751,21 @@ local function _AA_discoverData()
 			}
 		end
 
-		-- ----- Debuffs (no public module; fallback enum) -----
-		_AA_DATA.DEBUFF_CARDS = {
-			"Half DMG", "Slow", "Reduce Range", "Increase Cooldown", "Less Gold",
-		}
+		-- ----- Debuffs -----
+		local debuffs = requireByKey("Debuffs")
+		if debuffs and #debuffs > 0 then
+			_AA_DATA.DEBUFF_CARDS = debuffs
+		else
+			_AA_DATA.DEBUFF_CARDS = {
+				"Half DMG", "Slow", "Reduce Range", "Increase Cooldown", "Less Gold",
+			}
+		end
 
-		-- ----- Codes (no public module; AA fetches via remote) -----
-		-- Leave _AA_DATA.KNOWN_CODES empty unless the aggregator happens to
-		-- expose one (defensive — current source dump confirms none).
-		_AA_DATA.KNOWN_CODES = {}
+		-- ----- Codes (legacy: Codes_Pretesting; otherwise empty) -----
+		local codes = requireByKey("Codes")
+		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
 
 		-- ----- Tiers / Difficulty / Rarity -----
-		-- GameplaySettings is the single source of truth for these enums.
 		local constants
 		for _, entry in _AA_DATA_ROOTS.constants do
 			if entry.name == "GameplaySettings" then
@@ -742,11 +774,8 @@ local function _AA_discoverData()
 			end
 		end
 		if constants and #constants > 0 then
-			-- The constants list mixes difficulties + rarities + item groups;
-			-- that's fine for a generic tier display.
 			_AA_DATA.TIERS = constants
 		else
-			-- Last-ditch fallback enum.
 			_AA_DATA.TIERS = {
 				"Normal", "Hard", "Insane",
 				"Common", "Rare", "Epic", "Legendary",
@@ -755,10 +784,12 @@ local function _AA_discoverData()
 		end
 
 		-- ----- Acts (per-level entries with name = "Act N") -----
-		-- Pulled from Levels_<World>.lua entries that have story_level_rank.
-		local acts = _AA_requireFolder(
-			{ "src", "Data", "Levels" },
-			function(v) return type(v.story_level_rank) == "number" end)
+		local acts = requireByKey("Stages")
+		if not acts then
+			acts = _AA_requireFolder(
+				{ "src", "Data", "Levels" },
+				function(v) return type(v.story_level_rank) == "number" end)
+		end
 		if acts and #acts > 0 then _AA_DATA.ACTS = acts end
 		if #(_AA_DATA.ACTS or {}) == 0 then
 			_AA_DATA.ACTS = { "Act 1", "Act 2", "Act 3", "Act 4", "Act 5" }
