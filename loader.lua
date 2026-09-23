@@ -11,6 +11,7 @@ local BASE_URL = "https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/
 -- place id -> script filename (each is a self-contained monolithic hub)
 local SCRIPTS_BY_PLACE: { [number]: string } = {
 	[4584892739] = "adventure.lua", -- Anime Adventures
+	[5595353122] = "LukihoHub.client.lua", -- Legacy hub (Obsidian UI)
 }
 
 -- UI library sources. The hub uses these only as a best-effort; if every
