@@ -863,7 +863,7 @@ pcall(function()
 		Subtitle = "Anime Adventures | v" .. _AA_HUB_VERSION,
 		Size = UDim2.fromOffset(820, 580),
 		DragStyle = 1,
-		ShowUserInfo = true,
+		ShowUserInfo = false,
 		Keybind = Enum.KeyCode.RightControl,
 		AcrylicBlur = false,
 	})
