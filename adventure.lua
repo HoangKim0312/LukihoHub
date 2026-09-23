@@ -448,8 +448,11 @@ end
 local _AA_INGAME = {
 	autoSellOnWave = false,
 	autoSellFarmsOnWave = false,
+	autoSellOnWaveNum = 0,
 	autoLeaveOnWave = false,
+	autoLeaveOnWaveNum = 0,
 	autoUpgradeOnWave = false,
+	autoUpgradeOnWaveNum = 0,
 	autoUpgradeFarmsOnly = false,
 	autoUpgradeCap = 9,
 	autoPlace = false,
@@ -495,13 +498,13 @@ local function _AA_ingameTickWaveActions()
 	if wave == _AA_INGAME.lastWave then return end
 	_AA_INGAME.lastWave = wave
 
-	if _AA_INGAME.autoSellOnWave then
+	if _AA_INGAME.autoSellOnWave and (_AA_INGAME.autoSellOnWaveNum == 0 or wave == _AA_INGAME.autoSellOnWaveNum) then
 		for _, unit in _AA_listFieldUnits() do
 			if _AA_INGAME.autoSellFarmsOnWave or not _AA_isFarm(unit) then _AA_sellUnit(unit) end
 		end
 	end
-	if _AA_INGAME.autoLeaveOnWave then _AA_invoke(_AA_REMOTE.teleport_back_to_lobby) end
-	if _AA_INGAME.autoUpgradeOnWave then
+	if _AA_INGAME.autoLeaveOnWave and (_AA_INGAME.autoLeaveOnWaveNum == 0 or wave == _AA_INGAME.autoLeaveOnWaveNum) then _AA_invoke(_AA_REMOTE.teleport_back_to_lobby) end
+	if _AA_INGAME.autoUpgradeOnWave and (_AA_INGAME.autoUpgradeOnWaveNum == 0 or wave == _AA_INGAME.autoUpgradeOnWaveNum) then
 		for _, unit in _AA_listFieldUnits() do
 			if _AA_INGAME.autoUpgradeFarmsOnly and not _AA_isFarm(unit) then continue end
 			local lvl = unit:GetAttribute("level") or 0
@@ -738,9 +741,28 @@ local function _AA_postWebhook(url, payload)
 	if url == nil or url == "" then return end
 	local ok, body = pcall(function() return HttpService:JSONEncode(payload) end)
 	if not ok then return end
-	pcall(function()
-		(HttpService :: any):PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
-	end)
+
+	-- Prefer the executor's request hook when HttpService is disabled
+	-- (most external executors run with HttpEnabled=false).
+	local sent = false
+	local req = (request or http_request or http and http.request or syn and syn.request)
+	if type(req) == "function" then
+		pcall(function()
+			req({
+				Url = url,
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = body,
+			})
+			sent = true
+		end)
+	end
+
+	if not sent then
+		pcall(function()
+			(HttpService :: any):PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
+		end)
+	end
 end
 
 local function _AA_notifyWebhook(title, description, color, ping)
@@ -1126,8 +1148,11 @@ if _AA_Window then
 		left:Header({ Text = "Wave Actions" })
 		left:Toggle({ Name = "Auto Sell Units on Wave", Default = false, Callback = function(v) _AA_INGAME.autoSellOnWave = v; _AA_log("OK", "AutoSell=" .. tostring(v)) end }, "AutoSell")
 		left:Toggle({ Name = "Auto Sell Farms on Wave", Default = false, Callback = function(v) _AA_INGAME.autoSellFarmsOnWave = v end }, "AutoSellFarms")
+		left:Slider({ Name = "Sell On Wave (0 = all)", Default = 0, Minimum = 0, Maximum = 20, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_INGAME.autoSellOnWaveNum = v end }, "AutoSellWaveNum")
 		left:Toggle({ Name = "Auto Leave on Wave", Default = false, Callback = function(v) _AA_INGAME.autoLeaveOnWave = v end }, "AutoLeave")
+		left:Slider({ Name = "Leave On Wave (0 = any)", Default = 0, Minimum = 0, Maximum = 20, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_INGAME.autoLeaveOnWaveNum = v end }, "AutoLeaveWaveNum")
 		left:Toggle({ Name = "Auto Upgrade on Wave", Default = false, Callback = function(v) _AA_INGAME.autoUpgradeOnWave = v end }, "AutoUpgrade")
+		left:Slider({ Name = "Upgrade On Wave (0 = all)", Default = 0, Minimum = 0, Maximum = 20, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_INGAME.autoUpgradeOnWaveNum = v end }, "AutoUpgradeWaveNum")
 		left:Toggle({ Name = "Focus Upgrade Farms", Default = false, Callback = function(v) _AA_INGAME.autoUpgradeFarmsOnly = v end }, "FocusFarms")
 		left:Slider({ Name = "Auto Upgrade Cap", Default = 9, Minimum = 1, Maximum = 10, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_INGAME.autoUpgradeCap = v end }, "UpgradeCap")
 		left:Header({ Text = "Auto Place" })
@@ -1228,7 +1253,35 @@ if _AA_Window then
 		left:Input({ Name = "Ping User ID", Placeholder = "000000000000", AcceptedCharacters = "Numeric", Callback = function(v) _AA_MISC.pingUserID = v end }, "PingUser")
 		left:Dropdown({ Name = "Ping on Selected", Search = true, Multi = true, Required = false, Options = { "Takedown", "Drop", "Match Found" }, Default = {}, Callback = function(v) _AA_MISC.pingOnSelected = v end }, "PingOn")
 		left:Toggle({ Name = "Ping on Secret Drop", Default = false, Callback = function(v) _AA_MISC.pingOnSecretDrop = v end }, "PingSecretDrop")
-		left:Button({ Name = "Send Test Webhook", Callback = function() _AA_notifyWebhook("Test", "LukihoHub is online", 0x00BFFF, true) end })
+		left:Button({ Name = "Send Test Webhook", Callback = function()
+			local url = _AA_MISC.webhookURL
+			if url == "" then _AA_Window:Notify({ Title = "LukihoHub", Description = "Webhook URL is empty." }); return end
+			local payload = {
+				username = "LukihoHub",
+				embeds = { { title = "Test", description = "LukihoHub is online", color = 0x00BFFF, footer = { text = "Anime Adventures" } } },
+			}
+			local ok, body = pcall(function() return HttpService:JSONEncode(payload) end)
+			if not ok then _AA_Window:Notify({ Title = "LukihoHub", Description = "JSON encode failed." }); return end
+			local req = (request or http_request or http and http.request or syn and syn.request)
+			local sent = false
+			if type(req) == "function" then
+				local ok2, err = pcall(function()
+					req({ Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
+					sent = true
+				end)
+				if ok2 then sent = true; _AA_Window:Notify({ Title = "LukihoHub", Description = "Sent via executor request." }) end
+			end
+			if not sent then
+				local ok3 = pcall(function()
+					(HttpService :: any):PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
+					sent = true
+				end)
+				if ok3 then _AA_Window:Notify({ Title = "LukihoHub", Description = "Sent via HttpService." }) end
+			end
+			if not sent then
+				_AA_Window:Notify({ Title = "LukihoHub", Description = "Send failed. Check executor's HTTP permissions or Discord webhook URL." })
+			end
+		end })
 
 		local right = tab:Section({ Side = "Right" })
 		right:Header({ Text = "Visibility / Misc" })
