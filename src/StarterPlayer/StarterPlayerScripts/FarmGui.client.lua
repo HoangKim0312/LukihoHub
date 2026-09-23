@@ -1,9 +1,12 @@
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+
+local MacroRecorder = require(script.Parent:WaitForChild("MacroRecorder"))
 
 local ENEMY_TAG = "Enemy"
 local GUI_NAME = "FarmControlGui"
@@ -359,11 +362,13 @@ end
 navButton("Farm", 1)
 navButton("Movement", 2)
 navButton("Chests & Loot", 3)
-navButton("UI Settings", 4)
+navButton("Macros", 4)
+navButton("UI Settings", 5)
 
 local farmPage = newPage("Farm")
 local movementPage = newPage("Movement")
 local lootPage = newPage("Chests & Loot")
+local macrosPage = newPage("Macros")
 local uiPage = newPage("UI Settings")
 
 local function section(parent, heading, description)
@@ -724,6 +729,122 @@ local uiSettingsSection = section(uiPage, "Interface", "Clean local UI with no r
 cycle(uiSettingsSection, "Notification Side", { "Right", "Left" }, 1, function(value)
 	screenGui:SetAttribute("NotificationSide", value)
 end)
+
+local macroStatus = label(macrosPage, "Idle", 12, COLORS.muted)
+local macroNameBox = create("TextBox", {
+	Size = UDim2.new(1, 0, 0, 34),
+	BackgroundColor3 = COLORS.field,
+	BorderSizePixel = 0,
+	ClearTextOnFocus = false,
+	Font = Enum.Font.Code,
+	PlaceholderText = "Macro name (e.g. Stage5_SpeedRun)",
+	PlaceholderColor3 = COLORS.muted,
+	Text = "",
+	TextColor3 = COLORS.text,
+	TextSize = 13,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = macrosPage,
+})
+corner(macroNameBox, 4)
+stroke(macroNameBox)
+create("UIPadding", {
+	PaddingLeft = UDim.new(0, 14),
+	PaddingRight = UDim.new(0, 14),
+	Parent = macroNameBox,
+})
+
+local macroRecordButton = button(macrosPage, "Record Macro", function()
+	local name = macroNameBox.Text
+	if MacroRecorder.Recording then
+		local ok, snapshot = MacroRecorder.StopRecording()
+		if ok then
+			macroStatus.Text = "Stopped (waiting for stage end to save)"
+		else
+			macroStatus.Text = "Failed: " .. tostring(snapshot)
+		end
+		macroRecordButton.Text = "Record Macro"
+		return
+	end
+	local ok, err = MacroRecorder.StartRecording(name)
+	if ok then
+		macroStatus.Text = "Recording: " .. name
+		macroRecordButton.Text = "Stop Recording"
+	else
+		macroStatus.Text = "Cannot record: " .. tostring(err)
+	end
+end)
+
+local macroPlayButton = button(macrosPage, "Play Selected Macro", function()
+	local name = macroNameBox.Text
+	if name == "" then
+		macroStatus.Text = "Enter a macro name first"
+		return
+	end
+	local ok, err = MacroRecorder.PlayMacro(name)
+	if ok then
+		macroStatus.Text = "Playing: " .. name
+	else
+		macroStatus.Text = "Cannot play: " .. tostring(err)
+	end
+end)
+
+local macroRefreshButton = button(macrosPage, "Refresh macro list", function()
+	refreshMacroList()
+end)
+
+local macroListFrame = create("Frame", {
+	Size = UDim2.new(1, 0, 0, 0),
+	AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1,
+	Parent = macrosPage,
+})
+create("UIListLayout", {
+	Padding = UDim.new(0, 5),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	Parent = macroListFrame,
+})
+
+function refreshMacroList()
+	for _, child in macroListFrame:GetChildren() do
+		if not child:IsA("UIListLayout") then
+			child:Destroy()
+		end
+	end
+	local data = MacroRecorder.ListMacros()
+	local names = data.names or {}
+	if #names == 0 then
+		label(macroListFrame, "No saved macros yet.", 12, COLORS.muted)
+		return
+	end
+	for _, name in names do
+		local entry = button(macroListFrame, name, function()
+			macroNameBox.Text = name
+		end)
+		entry.Name = name
+	end
+end
+
+MacroRecorder.Init(function(state, payload)
+	if state == "recording" then
+		macroStatus.Text = "Recording: " .. tostring(payload.name)
+		macroRecordButton.Text = "Stop Recording"
+	elseif state == "stopped" then
+		macroStatus.Text = string.format("Captured %d actions, waiting for stage end.", payload.count or 0)
+	elseif state == "saved" then
+		macroStatus.Text = string.format("Saved macro '%s' (%d actions).", tostring(payload.name), payload.count or 0)
+		macroRecordButton.Text = "Record Macro"
+		refreshMacroList()
+	elseif state == "error" then
+		macroStatus.Text = "Save failed for " .. tostring(payload.name)
+		macroRecordButton.Text = "Record Macro"
+	elseif state == "playing" then
+		macroStatus.Text = string.format("Playing '%s' (%d actions)...", tostring(payload.name), payload.count or 0)
+	elseif state == "finished" then
+		macroStatus.Text = "Finished playing " .. tostring(payload.name)
+	end
+end)
+
+refreshMacroList()
 slider(uiSettingsSection, "Interface Scale", 0.75, 1.25, preferredScale, 0.05, function(value)
 	preferredScale = value
 	screenGui:SetAttribute("InterfaceScale", value)
