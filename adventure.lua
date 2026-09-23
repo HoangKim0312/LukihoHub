@@ -414,17 +414,51 @@ end
 -- so the recursive Instance walk cannot find it. We require the module
 -- directly (safe on executors — global `require` is available) and pull
 -- every `name` field out of the returned table.
-local _AA_MODULE_PATHS = {
-	maps       = { "src", "data", "maps",       "Maps_Pretesting" },
-	portals    = { "src", "data", "portals",    "Portals_Pretesting" },
-	modifiers  = { "src", "data", "modifiers",  "Modifiers_Pretesting" },
-	buffs      = { "src", "data", "buffs",      "Buffs_Pretesting" },
-	debuffs    = { "src", "data", "debuffs",    "Debuffs_Pretesting" },
-	codes      = { "src", "data", "codes",      "Codes_Pretesting" },
-	tiers      = { "src", "data", "tiers",      "Tiers_Pretesting" },
-	worlds     = { "src", "data", "worlds",     "Worlds_Pretesting" },
-	stages     = { "src", "data", "stages",     "Stages_Pretesting" },
-	difficulties = { "src", "data", "difficulties", "Difficulties_Pretesting" },
+-- Anime Adventures stores its data as Lua tables under ReplicatedStorage.src.Data.*
+-- Pattern (verified from source dump):
+--   * Aggregator ModuleScripts at `src.Data.<Folder>.<Folder>` that require every
+--     `*_Pretesting`/child Module and merge them into one big table.
+--     Examples: Maps, Items, Skins, Titles, Quests, Banners, Buffs, Emotes.
+--   * Per-world child Modules named `Maps_<World>` / `Levels_<World>` /
+--     `Items_Portals<World>` etc.
+--   * Constant/enum module `src.Data.GameplaySettings` exposing DIFFICULTIES,
+--     UNIT_RARITIES, RARITY_TIERS, etc. as plain fields.
+-- The `.name` field carries the display string; `.id` is the snake_case key.
+local _AA_DATA_ROOTS = {
+	-- Each entry: list of path segments relative to ReplicatedStorage (or
+	-- ServerStorage mirror) pointing at an aggregator ModuleScript.
+	aggregators = {
+		{ name = "Maps",        path = { "src", "Data", "Maps",        "Maps"        } },
+		{ name = "Levels",      path = { "src", "Data", "Levels",      "Levels"      } },
+		{ name = "Buffs",       path = { "src", "Data", "Buffs",       "Buffs"       } },
+		{ name = "Items",       path = { "src", "Data", "Items",       "Items"       } },
+		{ name = "Skins",       path = { "src", "Data", "Skins",       "Skins"       } },
+		{ name = "Titles",      path = { "src", "Data", "Titles",      "Titles"      } },
+		{ name = "Quests",      path = { "src", "Data", "Quests",      "Quests"      } },
+		{ name = "Banners",     path = { "src", "Data", "Banners",     "Banners"     } },
+		{ name = "Blessings",   path = { "src", "Data", "Blessings",   "Blessings"   } },
+		{ name = "Missions",    path = { "src", "Data", "Missions",    "Missions"    } },
+		{ name = "BattlePass",  path = { "src", "Data", "BattlePass",  "BattlePass"  } },
+		{ name = "Emotes",      path = { "src", "Data", "Emotes",      "Emotes"      } },
+	},
+	-- Constant/enum modules that don't expose a .name field — we pluck the
+	-- specific fields listed in `fields` instead of every entry's name.
+	constants = {
+		{
+			name   = "GameplaySettings",
+			path   = { "src", "Data", "GameplaySettings", "GameplaySettings" },
+			fields = { "DIFFICULTIES", "UNIT_RARITIES", "RARITY_TIERS",
+				"ITEM_GROUPS", "BANNER_TIERS" },
+		},
+	},
+	-- Folder roots we walk, requiring every ModuleScript child and collecting
+	-- its names. Each folder is one category; we only pick names that match
+	-- the category's `nameKey` heuristic (e.g. portals have "_portal" id).
+	folderScans = {
+		{ name = "Portals_AsLevels", folder = { "src", "Data", "Levels" } },
+		{ name = "Portals_AsItems",  folder = { "src", "Data", "Items", "UniqueItems", "Portals" } },
+		{ name = "Acts",             folder = { "src", "Data", "Levels" } },
+	},
 }
 
 local function _AA_collectNamesFromTable(tbl, out, depth)
@@ -458,24 +492,108 @@ local function _AA_dedupe(list)
 	return order
 end
 
-local function _AA_requireNames(rootName, pathSegments)
+-- Walk a path of FindFirstChild and require the resulting ModuleScript.
+-- Tries ReplicatedStorage first, then ServerStorage as a mirror (some
+-- executors expose it, some don't).
+local function _AA_requireNode(pathSegments)
 	if type(require) ~= "function" then return nil end
-	local ok, root = pcall(game.FindService, game, rootName)
-	if not ok or not root then return nil end
-	local node = root
-	for _, seg in pathSegments do
-		node = node and node:FindFirstChild(seg)
-		if not node then return nil end
+	for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+		local ok, root = pcall(game.FindService, game, rootName)
+		if ok and root then
+			local node = root
+			local found = true
+			for _, seg in pathSegments do
+				node = node and node:FindFirstChild(seg)
+				if not node then found = false; break end
+			end
+			if found and node and node:IsA("ModuleScript") then
+				local ok2, result = pcall(require, node)
+				if ok2 and type(result) == "table" then
+					return result
+				end
+			end
+		end
 	end
-	if not node:IsA("ModuleScript") then return nil end
-	local ok2, result = pcall(require, node)
-	if not ok2 or type(result) ~= "table" then
-		_AA_log("WRN", string.format("require(%s.%s) failed: %s",
-			rootName, table.concat(pathSegments, "."), tostring(result)))
-		return nil
+	return nil
+end
+
+-- For each aggregator, require its ModuleScript and return all names.
+local function _AA_requireAggregator(entry)
+	local tbl = _AA_requireNode(entry.path)
+	if not tbl then return nil end
+	return _AA_dedupe(_AA_collectNamesFromTable(tbl))
+end
+
+-- For constant modules (GameplaySettings), pull only specific top-level
+-- string-array fields.
+local function _AA_requireConstants(entry)
+	local tbl = _AA_requireNode(entry.path)
+	if not tbl then return nil end
+	local out = {}
+	for _, field in entry.fields do
+		local v = tbl[field]
+		if type(v) == "table" then
+			for _, item in pairs(v) do
+				if type(item) == "string" then
+					out[#out + 1] = item
+				elseif type(item) == "table" and type(item.name) == "string" then
+					out[#out + 1] = item.name
+				end
+			end
+		elseif type(v) == "string" then
+			out[#out + 1] = v
+		end
 	end
-	local names = _AA_collectNamesFromTable(result)
-	return _AA_dedupe(names)
+	return _AA_dedupe(out)
+end
+
+-- Walk a folder recursively and require every ModuleScript found, then collect
+-- names from the result. `predicate(name)` lets callers filter for things
+-- like portal entries (id contains "_portal" or entry._portal_only_level).
+local function _AA_requireFolder(folderSegments, predicate)
+	if type(require) ~= "function" then return nil end
+	local folder
+	for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+		local ok, root = pcall(game.FindService, game, rootName)
+		if ok and root then
+			local node = root
+			local found = true
+			for _, seg in folderSegments do
+				node = node and node:FindFirstChild(seg)
+				if not node then found = false; break end
+			end
+			if found and node then folder = node; break end
+		end
+	end
+	if not folder then return nil end
+
+	local out = {}
+	local function walk(node)
+		if not node then return end
+		if node:IsA("ModuleScript") then
+			local ok, tbl = pcall(require, node)
+			if ok and type(tbl) == "table" then
+				for _, v in pairs(tbl) do
+					if type(v) == "table" then
+						local matches = predicate and predicate(v, node) or true
+						if matches then
+							if type(v.name) == "string" and v.name ~= "" then
+								out[#out + 1] = v.name
+							elseif type(v.id) == "string" and v.id ~= "" then
+								out[#out + 1] = v.id
+							end
+						end
+					end
+				end
+			end
+			return -- don't recurse into a ModuleScript's children (none anyway)
+		end
+		for _, child in node:GetChildren() do
+			walk(child)
+		end
+	end
+	walk(folder)
+	return _AA_dedupe(out)
 end
 
 -- Run a deep scan across every relevant root, accumulating matches.
@@ -508,16 +626,18 @@ end
 
 local function _AA_discoverData()
 	pcall(function()
-		-- Try ModuleScript require first — AA's authoritative source of truth
-		-- lives in `src.data.<kind>.<Kind>_Pretesting`. If the module loads
-		-- we get the real names directly. Only fall back to folder scan if
-		-- the module path doesn't exist or require fails.
+		-- All authoritative AA data is Lua tables inside ModuleScripts under
+		-- ReplicatedStorage.src.Data.*. We try the verified aggregator paths
+		-- first, then constant modules, then folder walks, then fall back to
+		-- a deep instance scan, then to a hardcoded list.
 
-		-- Maps
+		-- ----- Maps (world lobbies) -----
 		local maps
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			maps = _AA_requireNames(rootName, _AA_MODULE_PATHS.maps)
-			if maps and #maps > 0 then break end
+		for _, entry in _AA_DATA_ROOTS.aggregators do
+			if entry.name == "Maps" then
+				maps = _AA_requireAggregator(entry)
+				if maps and #maps > 0 then break end
+			end
 		end
 		if not maps then
 			maps = _AA_pick(game:FindService("ReplicatedStorage"), {
@@ -539,13 +659,23 @@ local function _AA_discoverData()
 		if maps then _AA_DATA.MAPS = maps end
 		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = _AA_FALLBACK_MAPS end
 
-		-- Portals
-		local portals
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			portals = _AA_requireNames(rootName, _AA_MODULE_PATHS.portals)
-			if portals and #portals > 0 then break end
-		end
-		if not portals then
+		-- ----- Portals -----
+		-- Two storage strategies: portal-as-level (Levels_<World>_Portals.lua)
+		-- and portal-as-item (Items_Portals<World>.lua under
+		-- src.Data.Items.UniqueItems.Portals). Walk both folders.
+		local portals = _AA_requireFolder(
+			{ "src", "Data", "Levels" },
+			function(v) return v._portal_only_level == true
+				or (type(v.id) == "string" and v.id:find("_portal", 1, true) ~= nil)
+			end)
+		local portals2 = _AA_requireFolder(
+			{ "src", "Data", "Items", "UniqueItems", "Portals" },
+			function(v) return type(v._unique_portal_levels) == "table" end)
+		local merged = {}
+		if portals then for _, n in portals do merged[#merged + 1] = n end end
+		if portals2 then for _, n in portals2 do merged[#merged + 1] = n end end
+		portals = _AA_dedupe(merged)
+		if #portals == 0 then
 			portals = _AA_pick(game:FindService("ReplicatedStorage"), {
 				{ "Portals" }, { "Portal" }, { "Data", "Portals" },
 			})
@@ -553,103 +683,92 @@ local function _AA_discoverData()
 		if not portals then
 			portals = _AA_fullScan({ "portal" }, { maxDepth = 10, maxCount = 600 })
 		end
-		if portals then _AA_DATA.PORTALS = portals end
+		if portals and #portals > 0 then _AA_DATA.PORTALS = portals end
 		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
 
-		-- Modifiers
-		local mods
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			mods = _AA_requireNames(rootName, _AA_MODULE_PATHS.modifiers)
-			if mods and #mods > 0 then break end
-		end
-		if not mods then
-			mods = _AA_pick(game:FindService("ReplicatedStorage"), {
-				{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
-			})
-		end
-		if not mods then
-			mods = _AA_fullScan({
-				"hard", "insane", "chilly", "foggy", "burning",
-				"modifier", "challenge", "sweltering", "windy",
-			}, { maxDepth = 10 })
-		end
-		if mods then _AA_DATA.MODIFIERS = mods end
+		-- ----- Modifiers (Chill/Foggy/Burning) -----
+		-- AA does not ship a data module for these. They appear to be
+		-- runtime/post-process effects. We expose an enum fallback so the
+		-- dropdown still has something to pick from.
+		_AA_DATA.MODIFIERS = {
+			"Normal", "Hard", "Insane", "Chilly", "Foggy", "Burning",
+			"Sweltering", "Windy", "Dusk", "Dawn",
+		}
 
-		-- Buff cards
+		-- ----- Buffs (combat status effects from src.Data.Buffs.Buffs) -----
 		local buffs
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			buffs = _AA_requireNames(rootName, _AA_MODULE_PATHS.buffs)
-			if buffs and #buffs > 0 then break end
+		for _, entry in _AA_DATA_ROOTS.aggregators do
+			if entry.name == "Buffs" then
+				buffs = _AA_requireAggregator(entry)
+				if buffs and #buffs > 0 then break end
+			end
 		end
 		if not buffs then
 			buffs = _AA_pick(game:FindService("ReplicatedStorage"), {
-				{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
+				{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" },
+				{ "Data", "BuffCards" },
 			})
 		end
 		if not buffs then
 			buffs = _AA_fullScan({
 				"buff", "damage", "gold", "range", "cooldown",
-				"slot", "speed", "card", "boost",
+				"slot", "speed", "card", "boost", "fire", "freeze", "stun",
 			}, { maxDepth = 10 })
 		end
-		if buffs then _AA_DATA.BUFF_CARDS = buffs end
+		if buffs and #buffs > 0 then _AA_DATA.BUFF_CARDS = buffs end
+		if #_AA_DATA.BUFF_CARDS == 0 then
+			_AA_DATA.BUFF_CARDS = {
+				"Damage+", "Gold+", "Range+", "Cooldown-", "Speed+", "Slot+",
+			}
+		end
 
-		-- Debuff cards
-		local debuffs
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			debuffs = _AA_requireNames(rootName, _AA_MODULE_PATHS.debuffs)
-			if debuffs and #debuffs > 0 then break end
-		end
-		if not debuffs then
-			debuffs = _AA_pick(game:FindService("ReplicatedStorage"), {
-				{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
-			})
-		end
-		if not debuffs then
-			debuffs = _AA_fullScan({
-				"debuff", "half", "slow", "reduce", "increase", "less",
-			}, { maxDepth = 10 })
-		end
-		if debuffs then _AA_DATA.DEBUFF_CARDS = debuffs end
+		-- ----- Debuffs (no public module; fallback enum) -----
+		_AA_DATA.DEBUFF_CARDS = {
+			"Half DMG", "Slow", "Reduce Range", "Increase Cooldown", "Less Gold",
+		}
 
-		-- Codes
-		local codes
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			codes = _AA_requireNames(rootName, _AA_MODULE_PATHS.codes)
-			if codes and #codes > 0 then break end
-		end
-		if not codes then
-			codes = _AA_pick(game:FindService("ReplicatedStorage"), {
-				{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
-			})
-		end
-		if not codes then
-			codes = _AA_fullScan({ "code", "redeem" }, { maxDepth = 10, maxCount = 200 })
-		end
-		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
+		-- ----- Codes (no public module; AA fetches via remote) -----
+		-- Leave _AA_DATA.KNOWN_CODES empty unless the aggregator happens to
+		-- expose one (defensive — current source dump confirms none).
+		_AA_DATA.KNOWN_CODES = {}
 
-		-- Tiers
-		local tiers
-		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
-			tiers = _AA_requireNames(rootName, _AA_MODULE_PATHS.tiers)
-			if tiers and #tiers > 0 then break end
+		-- ----- Tiers / Difficulty / Rarity -----
+		-- GameplaySettings is the single source of truth for these enums.
+		local constants
+		for _, entry in _AA_DATA_ROOTS.constants do
+			if entry.name == "GameplaySettings" then
+				constants = _AA_requireConstants(entry)
+				if constants and #constants > 0 then break end
+			end
 		end
-		if not tiers then
-			tiers = _AA_pick(game:FindService("ReplicatedStorage"), {
-				{ "Tiers" }, { "Data", "Tiers" },
-			})
+		if constants and #constants > 0 then
+			-- The constants list mixes difficulties + rarities + item groups;
+			-- that's fine for a generic tier display.
+			_AA_DATA.TIERS = constants
+		else
+			-- Last-ditch fallback enum.
+			_AA_DATA.TIERS = {
+				"Normal", "Hard", "Insane",
+				"Common", "Rare", "Epic", "Legendary",
+				"Exclusive", "Mythic", "Secret",
+			}
 		end
-		if not tiers then
-			tiers = _AA_fullScan({
-				"tier", "t1", "t2", "t3", "t4", "t5", "t6",
-			}, { maxDepth = 10 })
+
+		-- ----- Acts (per-level entries with name = "Act N") -----
+		-- Pulled from Levels_<World>.lua entries that have story_level_rank.
+		local acts = _AA_requireFolder(
+			{ "src", "Data", "Levels" },
+			function(v) return type(v.story_level_rank) == "number" end)
+		if acts and #acts > 0 then _AA_DATA.ACTS = acts end
+		if #(_AA_DATA.ACTS or {}) == 0 then
+			_AA_DATA.ACTS = { "Act 1", "Act 2", "Act 3", "Act 4", "Act 5" }
 		end
-		if tiers then _AA_DATA.TIERS = tiers end
 
 		_AA_log("OK", string.format(
-			"Discovered: %d maps, %d portals, %d modifiers, %d buffs, %d debuffs, %d codes, %d tiers",
-			#_AA_DATA.MAPS, #_AA_DATA.PORTALS, #_AA_DATA.MODIFIERS,
-			#_AA_DATA.BUFF_CARDS, #_AA_DATA.DEBUFF_CARDS, #_AA_DATA.KNOWN_CODES, #_AA_DATA.TIERS))
+			"Discovered: %d maps, %d portals, %d buffs, %d debuffs, %d tiers, %d acts, %d codes",
+			#_AA_DATA.MAPS, #_AA_DATA.PORTALS,
+			#_AA_DATA.BUFF_CARDS, #_AA_DATA.DEBUFF_CARDS,
+			#_AA_DATA.TIERS, #(_AA_DATA.ACTS or {}), #_AA_DATA.KNOWN_CODES))
 	end)
 end
 
