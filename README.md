@@ -10,7 +10,7 @@ Monolithic — one self-contained file per supported place id, fetched by `loade
 
 | Path | Role |
 | --- | --- |
-| `loader.lua` | Public entry. Maps `game.PlaceId` → script file, fetches via `HttpGet`, then `loadstring`. Drop this in your executor. |
+| `loader.lua` | Public entry. Maps `game.PlaceId` → script file, prefetches MacLib into `_G._AA_MACLIB_SOURCE`, then fetches and `loadstring`s the hub. Drop this in your executor. |
 | `adventure.lua` | Anime Adventures (place `4584892739`). 8 tabs (Home, Lobby, Shop, In-Game, Event Card, Macro, Misc, Settings) wired to ~50 features (auto join/leave/challenge/portal, wave automation, macro recorder, webhook, hides, FPS cap, …). Single file, prefixed locals (`_AA_*`), no globals leaked beyond `_AA_HUB_VERSION` and `_AA_UNLOAD`. |
 
 ## Adding a new game

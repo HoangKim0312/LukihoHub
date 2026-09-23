@@ -13,6 +13,23 @@ local SCRIPTS_BY_PLACE: { [number]: string } = {
 	[4584892739] = "adventure.lua", -- Anime Adventures
 }
 
+-- UI library sources. The hub uses these only as a best-effort; if every
+-- mirror fails, the script still runs (automation features are headless).
+local MACLIB_URLS = {
+	"https://raw.githubusercontent.com/biggaboy212/Maclib/main/maclib.txt",
+	"https://raw.githubusercontent.com/biggaboy212/Maclib/master/maclib.txt",
+}
+
+local function tryFetch(url)
+	local ok, body = pcall(function()
+		return (game :: any):HttpGet(url)
+	end)
+	if not ok or type(body) ~= "string" or #body < 100 then
+		return nil
+	end
+	return body
+end
+
 local scriptPath = SCRIPTS_BY_PLACE[game.PlaceId]
 if not scriptPath then
 	return
@@ -27,6 +44,20 @@ local fetched, source = pcall(function()
 end)
 if not fetched then
 	error("[Lukiho] Could not fetch script. Check repo visibility / branch / filename: " .. tostring(source))
+end
+
+-- Pre-fetch the UI library on this level (top-level loadstring has the
+-- most reliable HttpGet permissions across executors). If any mirror works,
+-- hand the source to the hub so it doesn't have to refetch.
+local macLibSource = nil
+for _, url in MACLIB_URLS do
+	macLibSource = tryFetch(url)
+	if macLibSource then break end
+end
+if macLibSource then
+	_G._AA_MACLIB_SOURCE = macLibSource
+else
+	_G._AA_MACLIB_SOURCE = nil
 end
 
 local compile, syntaxError = loadstring(source)

@@ -855,29 +855,43 @@ _AA_on(RunService.Heartbeat, _AA_tick)
 local _AA_Window = nil
 
 local _AA_MACLIB_URLS = {
-	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
-	"https://github.com/biggaboy212/Maclib/releases/download/8.Maclib/maclib.txt",
-	"https://github.com/biggaboy212/Maclib/releases/download/7.Maclib/maclib.txt",
+	"https://raw.githubusercontent.com/biggaboy212/Maclib/main/maclib.txt",
+	"https://raw.githubusercontent.com/biggaboy212/Maclib/master/maclib.txt",
 }
 
+local function _AA_fetchRaw(url)
+	local ok, body = pcall(function() return (game :: any):HttpGet(url) end)
+	if not ok or type(body) ~= "string" or #body < 100 then
+		return nil
+	end
+	return body
+end
+
 local function _AA_loadMacLib()
+	-- 1. Try the source that the loader may have prefetched (same HttpGet level as the loader).
+	if type(_G._AA_MACLIB_SOURCE) == "string" and #_G._AA_MACLIB_SOURCE > 100 then
+		local ok, lib = pcall(loadstring, _G._AA_MACLIB_SOURCE)
+		if ok and lib then return lib, "preloaded" end
+		warn("[LukihoHub] MacLib loadstring failed on prefetched source")
+	end
+
+	-- 2. Direct fetch via raw GitHub.
 	for _, url in _AA_MACLIB_URLS do
-		local ok, src = pcall(function() return (game :: any):HttpGet(url) end)
-		if ok and type(src) == "string" and #src > 100 then
-			local ok2, lib = pcall(loadstring(src))
-			if ok2 and lib then return lib end
+		local body = _AA_fetchRaw(url)
+		if body then
+			local ok, lib = pcall(loadstring, body)
+			if ok and lib then return lib, url end
 			warn("[LukihoHub] MacLib loadstring failed for " .. url)
-		else
-			warn("[LukihoHub] MacLib fetch failed for " .. url)
 		end
 	end
-	return nil
+
+	return nil, "all-fetch-failed"
 end
 
 do
-	local MacLib = _AA_loadMacLib()
+	local MacLib, via = _AA_loadMacLib()
 	if not MacLib then
-		warn("[LukihoHub] MacLib could not be loaded from any mirror; UI will not show.")
+		warn("[LukihoHub] MacLib could not be loaded (" .. tostring(via) .. "); UI will not show.")
 	else
 		local ok, win = pcall(function()
 			return MacLib:Window({
