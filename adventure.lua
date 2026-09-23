@@ -6,7 +6,12 @@
 --   _AA_UNLOAD (function set after load)
 -- Everything else is local.
 
-if game.GameId ~= 4584892739 then return end
+local _AA_SUPPORTED_IDS = {
+	[4584892739]   = true,  -- legacy Anime Adventures
+	[10715453071]  = true,  -- current Anime Adventures (post-update)
+	[94823097601547] = true, -- Anime Adventures PlaceId variant
+}
+if not _AA_SUPPORTED_IDS[game.GameId] and not _AA_SUPPORTED_IDS[game.PlaceId] then return end
 
 if not game:IsLoaded() then
 	game.Loaded:Wait()
