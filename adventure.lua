@@ -173,6 +173,77 @@ local function _AA_invoke(name, ...)
 	return result
 end
 
+-- Discover map / portal names dynamically from common ReplicatedStorage folders.
+-- Falls back to place names already cached in the dropdown.
+local _AA_DISCOVERED = false
+local function _AA_discoverData()
+	if _AA_DISCOVERED then return end
+	_AA_DISCOVERED = true
+	pcall(function()
+		local rs = game:FindService("ReplicatedStorage")
+		if not rs then return end
+		-- Anime Adventures commonly exposes worlds as StringValues under
+		-- ReplicatedStorage.Maps (folder of StringValues) or as objects under
+		-- "Lobbies". Try a few common paths and dedupe into _AA_DATA.
+		local candidateRoots = {
+			rs:FindFirstChild("Maps"),
+			rs:FindFirstChild("Worlds"),
+			rs:FindFirstChild("Lobbies"),
+			rs:FindFirstChild("Data") and rs.Data:FindFirstChild("Maps"),
+		}
+		local seen, order = {}, {}
+		for _, root in candidateRoots do
+			if root and root:IsA("Instance") then
+				if root:IsA("Folder") or root:IsA("Configuration") then
+					for _, child in root:GetChildren() do
+						local name
+						if child:IsA("StringValue") or child:IsA("ObjectValue") then
+							name = child.Value
+						elseif child:IsA("ModuleScript") or child:IsA("Folder") then
+							name = child.Name
+						end
+						if name and name ~= "" and not seen[name] then
+							seen[name] = true
+							table.insert(order, name)
+						end
+					end
+				elseif root:IsA("StringValue") then
+					local n = root.Value
+					if n and n ~= "" and not seen[n] then seen[n] = true; table.insert(order, n) end
+				end
+			end
+		end
+		if #order > 0 then
+			_AA_DATA.MAPS = order
+			_AA_log("OK", string.format("Discovered %d maps: %s", #order, table.concat(order, ", ")))
+		else
+			_AA_DATA.MAPS = { "Story Mode" }
+			_AA_log("WARN", "Map list empty after scan — using fallback 'Story Mode'")
+		end
+
+		-- Portals: scan common folder names ending in _portal.
+		local portalRoots = { rs:FindFirstChild("Portals"), rs:FindFirstChild("Portal") }
+		local pseen, porder = {}, {}
+		for _, root in portalRoots do
+			if root and root:IsA("Instance") then
+				for _, child in root:GetChildren() do
+					local n = child.Name
+					if n and n ~= "" and not pseen[n] then
+						pseen[n] = true
+						table.insert(porder, n)
+					end
+				end
+			end
+		end
+		if #porder > 0 then
+			_AA_DATA.PORTALS = porder
+			_AA_log("OK", string.format("Discovered %d portals", #porder))
+		else
+			_AA_DATA.PORTALS = { "default_portal" }
+		end
+	end)
+end
+
 local function _AA_fire(name, ...)
 	local r = _AA_get_remote(name)
 	if not r then return end
@@ -233,24 +304,10 @@ end
 local _AA_DATA = {
 	DIFFICULTIES = { "Easy", "Normal", "Hard", "Insane" },
 	JOIN_MODES   = { "Story", "Infinite", "LegendStage", "Raid" },
-	MAPS = {
-		"Naruto", "Demon Slayer", "My Hero Academia",
-		"Jujutsu Kaisen", "Bleach", "One Piece",
-		"Dragon Ball", "Hunter x Hunter", "JoJo",
-		"Fairy Tail", "Seven Deadly Sins", "Black Clover",
-		"Halloween", "Christmas", "April", "Namek",
-		"Dressrosa", "Marineford", "Sunraku",
-	},
+	-- MAPS / ACTS / PORTALS are populated dynamically from ReplicatedStorage.
+	MAPS = {},
 	ACTS  = { "Act 1", "Act 2", "Act 3", "Act 4", "Act 5", "Act 6" },
-	PORTALS = {
-		"final_disc", "april_portal", "marineford_portal",
-		"naruto_portal", "demonslayer_portal", "jjk_portal",
-		"hxh_portal", "namek_portal", "dressrosa_portal",
-		"halloween_portal", "christmas_portal", "bleach_portal",
-		"clover_portal", "7ds_portal", "fairytail_portal",
-		"aot_portal", "opm_portal", "mha_portal",
-		"sunraku_portal", "csm_portal", "jojo_portal",
-	},
+	PORTALS = {},
 	TIERS = { "T1", "T2", "T3", "T4", "T5" },
 	BUFF_CARDS = {
 		"Double Damage", "Gold Boost", "Range Boost",
@@ -1090,8 +1147,11 @@ if _AA_Window then
 	end)
 
 	-- LOBBY
-	_AA_build("Lobby", function()
-		local tab = TabGroup:Tab({ Name = "Lobby" })
+-- Discover map/portal names from ReplicatedStorage before building UI so
+-- dropdowns show the worlds that actually exist in this place.
+_AA_discoverData()
+_AA_build("Lobby", function()
+	local tab = TabGroup:Tab({ Name = "Lobby" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Auto Join Map" })
 		left:Dropdown({ Name = "Join Mode", Search = false, Multi = false, Required = false, Options = _AA_DATA.JOIN_MODES, Default = 1, Callback = function(v) _AA_LOBBY.joinMode = v end }, "JoinMode")
