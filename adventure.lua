@@ -254,8 +254,7 @@ local _AA_DATA = {
 	KNOWN_CODES = {},
 }
 
-local _AA_DISCOVERED = false
-local function _AA_collectNames(root)
+local _AA_collectNames(root)
 	if not root or not root:IsA("Instance") then return nil end
 	local seen, order = {}, {}
 	local function add(n)
@@ -289,43 +288,180 @@ local function _AA_pick(rs, paths)
 	return nil
 end
 
+-- Recursively walk a tree collecting StringValue/ObjectValue values whose
+-- Name looks like it could belong to the requested kind. Used when the game
+-- doesn't expose data in well-known folders (Anime Adventures often hides
+-- world names deep in nested folders / modules).
+local function _AA_recursiveScan(root, opts)
+	if not root then return nil end
+	local seen, order = {}, {}
+	local maxDepth = opts.maxDepth or 6
+	local whitelist = opts.whitelist
+	local blacklist = opts.blacklist or { ["_"] = true }
+	local count = 0
+	local maxCount = opts.maxCount or 200
+
+	local function add(name)
+		if not name or name == "" then return end
+		if blacklist[name] then return end
+		if whitelist then
+			local match = false
+			for _, w in whitelist do
+				if name:lower():find(w, 1, true) then match = true; break end
+			end
+			if not match then return end
+		end
+		if seen[name] then return end
+		seen[name] = true
+		table.insert(order, name)
+		count = count + 1
+	end
+
+	local function walk(node, depth)
+		if count >= maxCount then return end
+		if depth > maxDepth then return end
+		if not node or not node:IsA("Instance") then return end
+		if node:IsA("StringValue") or node:IsA("ObjectValue") then
+			add(node.Value)
+			add(node.Name)
+		end
+		for _, child in node:GetChildren() do
+			walk(child, depth + 1)
+		end
+	end
+
+	walk(root, 0)
+	return (#order > 0) and order or nil
+end
+
+-- Seed maps list with the official World 1 names. We keep this as the very
+-- last fallback so the dropdown is never empty and matches what the player
+-- actually sees in the lobby.
+local _AA_FALLBACK_MAPS = {
+	"Planet Greenie", "Walled City", "Snowy Town", "Sand Village", "Navy Bay",
+}
+
 -- Populate every list we can read from ReplicatedStorage. Anime Adventures
 -- exposes many of these as folders of StringValues (e.g. "Maps", "Portals",
 -- "Codes", "Tiers"). Any list that isn't found keeps its fallback.
 local function _AA_discoverData()
-	if _AA_DISCOVERED then return end
-	_AA_DISCOVERED = true
 	pcall(function()
 		local rs = game:FindService("ReplicatedStorage")
 		if not rs then return end
 
+		-- Maps: try direct paths first, then a deep scan, then fallback.
 		local maps = _AA_pick(rs, {
 			{ "Maps" }, { "Worlds" }, { "Lobbies" },
 			{ "Data", "Maps" }, { "Data", "Worlds" },
 		})
+		if not maps then
+			maps = _AA_recursiveScan(rs, {
+				maxDepth = 8,
+				maxCount = 50,
+				whitelist = { "planet", "walled", "snowy", "sand", "navy",
+					"naruto", "demon", "hero", "jujutsu", "bleach", "one piece",
+					"dragon", "hunter", "jojo", "fairy", "deadly", "clover",
+					"halloween", "christmas", "april", "namek", "dressrosa",
+					"marineford", "sunraku", "map", "world", "story" },
+			})
+		end
 		if maps then _AA_DATA.MAPS = maps end
-		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = { "Story Mode" } end
+		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = _AA_FALLBACK_MAPS end
 
 		local portals = _AA_pick(rs, {
 			{ "Portals" }, { "Portal" }, { "Data", "Portals" },
 		})
+		if not portals then
+			portals = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				maxCount = 60,
+				whitelist = { "portal" },
+			})
+		end
 		if portals then _AA_DATA.PORTALS = portals end
 		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
 
 		local mods = _AA_pick(rs, {
 			{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
 		})
+		if not mods then
+			mods = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				whitelist = { "hard", "insane", "chilly", "foggy", "burning",
+					"modifier" },
+			})
+		end
 		if mods then _AA_DATA.MODIFIERS = mods end
 
 		local buffs = _AA_pick(rs, {
 			{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
 		})
+		if not buffs then
+			buffs = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				whitelist = { "buff", "damage", "gold", "range", "cooldown",
+					"slot", "speed", "card" },
+			})
+		end
 		if buffs then _AA_DATA.BUFF_CARDS = buffs end
 
 		local debuffs = _AA_pick(rs, {
 			{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
 		})
+		if not debuffs then
+			debuffs = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				whitelist = { "debuff", "half", "slow", "reduce", "increase", "less" },
+			})
+		end
 		if debuffs then _AA_DATA.DEBUFF_CARDS = debuffs end
+
+		local codes = _AA_pick(rs, {
+			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
+		})
+		if not codes then
+			codes = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				maxCount = 40,
+				whitelist = { "code", "redeem" },
+			})
+		end
+		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
+
+		local tiers = _AA_pick(rs, {
+			{ "Tiers" }, { "Data", "Tiers" },
+		})
+		if not tiers then
+			tiers = _AA_recursiveScan(rs, {
+				maxDepth = 6,
+				whitelist = { "tier", "t1", "t2", "t3", "t4", "t5" },
+			})
+		end
+		if tiers then _AA_DATA.TIERS = tiers end
+
+		_AA_log("OK", string.format(
+			"Discovered: %d maps, %d portals, %d modifiers, %d buffs, %d debuffs, %d codes, %d tiers",
+			#_AA_DATA.MAPS, #_AA_DATA.PORTALS, #_AA_DATA.MODIFIERS,
+			#_AA_DATA.BUFF_CARDS, #_AA_DATA.DEBUFF_CARDS, #_AA_DATA.KNOWN_CODES, #_AA_DATA.TIERS))
+	end)
+end
+
+-- Re-scan on demand (used by the "Rescan Maps" button).
+local _AA_RESCAN_CONN
+function _AA_rescanData()
+	pcall(function()
+		-- Wipe everything that depends on discovery so the deep scan can
+		-- rebuild them with the actual current data.
+		_AA_DATA.MAPS = {}
+		_AA_DATA.PORTALS = {}
+		_AA_DATA.MODIFIERS = {}
+		_AA_DATA.BUFF_CARDS = {}
+		_AA_DATA.DEBUFF_CARDS = {}
+		_AA_DATA.KNOWN_CODES = {}
+		_AA_DATA.TIERS = {}
+		_AA_discoverData()
+	end)
+end
 
 		local codes = _AA_pick(rs, {
 			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
@@ -345,7 +481,6 @@ local function _AA_discoverData()
 end
 
 ----------------------------------------------------------------
--- 5. LOBBY STATE
 ----------------------------------------------------------------
 local _AA_LOBBY = {
 	autoJoin = false,
@@ -1240,8 +1375,21 @@ if _AA_Window then
 
 	-- LOBBY
 -- Discover map/portal names from ReplicatedStorage before building UI so
--- dropdowns show the worlds that actually exist in this place.
+-- dropdowns show the worlds that actually exist in this place. Re-scan a
+-- few times in case game data loads after the script (common with AA).
 _AA_discoverData()
+task.spawn(function()
+	for _, delay in { 1.5, 3, 6 } do
+		task.wait(delay)
+		pcall(function()
+			local before = #_AA_DATA.MAPS
+			_AA_rescanData()
+			if #_AA_DATA.MAPS ~= before then
+				_AA_log("OK", "Maps updated on rescan: " .. table.concat(_AA_DATA.MAPS, ", "))
+			end
+		end)
+	end
+end)
 _AA_build("Lobby", function()
 	local tab = TabGroup:Tab({ Name = "Lobby" })
 		local left = tab:Section({ Side = "Left" })
@@ -1259,6 +1407,10 @@ _AA_build("Lobby", function()
 		right:Dropdown({ Name = "Ignore Worlds", Search = true, Multi = true, Required = false, Options = _AA_DATA.MAPS, Default = {}, Callback = function(v) _AA_LOBBY.ignoreWorlds = v end }, "IgnoreWorlds")
 		right:Dropdown({ Name = "Ignore Modifiers", Search = true, Multi = true, Required = false, Options = _AA_DATA.MODIFIERS, Default = {}, Callback = function(v) _AA_LOBBY.ignoreModifiers = v end }, "IgnoreModifiers")
 		right:Toggle({ Name = "Auto Challenge", Default = false, Callback = function(v) _AA_LOBBY.autoChallenge = v end }, "AutoChallenge")
+		right:Button({ Name = "Rescan Maps / Portals", Callback = function()
+			_AA_rescanData()
+			_AA_Window:Notify({ Title = "LukihoHub", Description = string.format("Maps: %d, Portals: %d. Reopen dropdowns to see new list.", #_AA_DATA.MAPS, #_AA_DATA.PORTALS) })
+		end }, "Rescan")
 
 		local portal = tab:Section({ Side = "Left" })
 		portal:Header({ Text = "Auto Portal" })
