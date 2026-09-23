@@ -987,14 +987,21 @@ local function _AA_loadMacLib()
 	return nil, "not-injected-by-loader"
 end
 
--- Build the debug overlay before anything else so even early errors show.
-_AA_buildDebugGui()
+-- Build the debug overlay only when MacLib fails, so the screen stays
+-- clean during normal runs. Toggle re-enable it via _AA_showDebugGui().
+local _AA_debugGuiShown = false
+local function _AA_showDebugGui()
+	if _AA_debugGuiShown then return end
+	_AA_debugGuiShown = true
+	_AA_buildDebugGui()
+end
 _AA_log("INFO", string.format("LukihoHub v%s starting (place=%d)", _AA_HUB_VERSION, game.PlaceId))
 
 do
 	local MacLib, via = _AA_loadMacLib()
 	if not MacLib then
-		_AA_log("ERROR", "MacLib unavailable (" .. tostring(via) .. ") — running headless; debug overlay still active.")
+		_AA_showDebugGui()
+		_AA_log("ERROR", "MacLib unavailable (" .. tostring(via) .. ") — running headless; debug overlay active.")
 	else
 		_AA_log("OK", "MacLib loaded via " .. tostring(via))
 		local ok, win = pcall(function()
