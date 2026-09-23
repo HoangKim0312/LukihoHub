@@ -6,18 +6,12 @@ and is gated by `game.GameId`.
 
 ## Project layout
 
+Monolithic — one self-contained file per supported place id, fetched by `loader.lua`. No `require`, no `script.Parent` — runs cleanly inside `loadstring(game:HttpGet(...))()`.
+
 | Path | Role |
 | --- | --- |
-| `loader.lua` | Public entry. Maps `game.GameId` → script path, fetches via `HttpGet`, then `loadstring`. |
-| `games/aa/init.lua` | Shared bootstrap: remote catalog, fire/invoke helpers, lobby / stage detection, JSON helpers. |
-| `games/aa/data.lua` | Static catalogs (MAPS, PORTALS, DIFFICULTIES, KNOWN_CODES, …) derived from the `.rbxlx` dump. |
-| `games/aa/lobby.lua` | Auto Join Map / Challenge / Portal / Player + Auto Start. |
-| `games/aa/shop.lua` | Delete Portal, Auto Open Capsules, Auto Sell Skins. |
-| `games/aa/ingame.lua` | Auto Sell / Upgrade / Leave on wave, Auto Place, macro record/play. |
-| `games/aa/eventcard.lua` | Event card (roguelike modifier) picker — auto pick with priority + debuff filter. |
-| `games/aa/macro_storage.lua` | Macro save/load/import/export via executor `writefile`/`readfile`. |
-| `games/aa/misc.lua` | Discord webhook, Hide UI/Map/Name, Fake Outfit, Auto Reconnect, Auto Claim Quests, Redeem Codes, FPS cap. |
-| `games/aa/LukihoHub.client.lua` | MacLib UI: 8 tabs (Home, Lobby, Shop, In-Game, Event Card, Macro, Misc, Settings) wired to the modules above. |
+| `loader.lua` | Public entry. Maps `game.PlaceId` → script file, fetches via `HttpGet`, then `loadstring`. Drop this in your executor. |
+| `adventure.lua` | Anime Adventures (place `4584892739`). 8 tabs (Home, Lobby, Shop, In-Game, Event Card, Macro, Misc, Settings) wired to ~50 features (auto join/leave/challenge/portal, wave automation, macro recorder, webhook, hides, FPS cap, …). Single file, prefixed locals (`_AA_*`), no globals leaked beyond `_AA_HUB_VERSION` and `_AA_UNLOAD`. |
 
 ## Adding a new game
 
