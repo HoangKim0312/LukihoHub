@@ -408,6 +408,76 @@ local _AA_SCAN_ROOTS = function()
 	return roots
 end
 
+-- Anime Adventures ships its world data as Lua modules under
+-- `ReplicatedStorage.src.data.<kind>.<Kind>_Pretesting` returning a table of
+-- `{ id, name, ... }`. The Name lives in `.name`, not in an Instance field,
+-- so the recursive Instance walk cannot find it. We require the module
+-- directly (safe on executors — global `require` is available) and pull
+-- every `name` field out of the returned table.
+local _AA_MODULE_PATHS = {
+	maps       = { "src", "data", "maps",       "Maps_Pretesting" },
+	portals    = { "src", "data", "portals",    "Portals_Pretesting" },
+	modifiers  = { "src", "data", "modifiers",  "Modifiers_Pretesting" },
+	buffs      = { "src", "data", "buffs",      "Buffs_Pretesting" },
+	debuffs    = { "src", "data", "debuffs",    "Debuffs_Pretesting" },
+	codes      = { "src", "data", "codes",      "Codes_Pretesting" },
+	tiers      = { "src", "data", "tiers",      "Tiers_Pretesting" },
+	worlds     = { "src", "data", "worlds",     "Worlds_Pretesting" },
+	stages     = { "src", "data", "stages",     "Stages_Pretesting" },
+	difficulties = { "src", "data", "difficulties", "Difficulties_Pretesting" },
+}
+
+local function _AA_collectNamesFromTable(tbl, out, depth)
+	out = out or {}
+	depth = depth or 0
+	if depth > 4 or type(tbl) ~= "table" then return out end
+	for _, v in pairs(tbl) do
+		if type(v) == "table" then
+			if type(v.name) == "string" and v.name ~= "" then
+				out[#out + 1] = v.name
+			elseif type(v.id) == "string" and v.id ~= "" then
+				-- Some modules expose id but not name — keep id as a fallback
+				-- label so the dropdown still has something to show.
+				out[#out + 1] = v.id
+			else
+				_AA_collectNamesFromTable(v, out, depth + 1)
+			end
+		end
+	end
+	return out
+end
+
+local function _AA_dedupe(list)
+	local seen, order = {}, {}
+	for _, n in list do
+		if type(n) == "string" and n ~= "" and not seen[n] then
+			seen[n] = true
+			order[#order + 1] = n
+		end
+	end
+	return order
+end
+
+local function _AA_requireNames(rootName, pathSegments)
+	if type(require) ~= "function" then return nil end
+	local ok, root = pcall(game.FindService, game, rootName)
+	if not ok or not root then return nil end
+	local node = root
+	for _, seg in pathSegments do
+		node = node and node:FindFirstChild(seg)
+		if not node then return nil end
+	end
+	if not node:IsA("ModuleScript") then return nil end
+	local ok2, result = pcall(require, node)
+	if not ok2 or type(result) ~= "table" then
+		_AA_log("WRN", string.format("require(%s.%s) failed: %s",
+			rootName, table.concat(pathSegments, "."), tostring(result)))
+		return nil
+	end
+	local names = _AA_collectNamesFromTable(result)
+	return _AA_dedupe(names)
+end
+
 -- Run a deep scan across every relevant root, accumulating matches.
 local function _AA_fullScan(whitelist, opts)
 	opts = opts or {}
@@ -438,11 +508,23 @@ end
 
 local function _AA_discoverData()
 	pcall(function()
-		-- Maps: try direct paths first, then deep multi-root scan.
-		local maps = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "Maps" }, { "Worlds" }, { "Lobbies" },
-			{ "Data", "Maps" }, { "Data", "Worlds" },
-		})
+		-- Try ModuleScript require first — AA's authoritative source of truth
+		-- lives in `src.data.<kind>.<Kind>_Pretesting`. If the module loads
+		-- we get the real names directly. Only fall back to folder scan if
+		-- the module path doesn't exist or require fails.
+
+		-- Maps
+		local maps
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			maps = _AA_requireNames(rootName, _AA_MODULE_PATHS.maps)
+			if maps and #maps > 0 then break end
+		end
+		if not maps then
+			maps = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "Maps" }, { "Worlds" }, { "Lobbies" },
+				{ "Data", "Maps" }, { "Data", "Worlds" },
+			})
+		end
 		if not maps then
 			maps = _AA_fullScan({
 				"planet", "walled", "snowy", "sand", "navy",
@@ -458,9 +540,16 @@ local function _AA_discoverData()
 		if #_AA_DATA.MAPS == 0 then _AA_DATA.MAPS = _AA_FALLBACK_MAPS end
 
 		-- Portals
-		local portals = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "Portals" }, { "Portal" }, { "Data", "Portals" },
-		})
+		local portals
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			portals = _AA_requireNames(rootName, _AA_MODULE_PATHS.portals)
+			if portals and #portals > 0 then break end
+		end
+		if not portals then
+			portals = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "Portals" }, { "Portal" }, { "Data", "Portals" },
+			})
+		end
 		if not portals then
 			portals = _AA_fullScan({ "portal" }, { maxDepth = 10, maxCount = 600 })
 		end
@@ -468,9 +557,16 @@ local function _AA_discoverData()
 		if #_AA_DATA.PORTALS == 0 then _AA_DATA.PORTALS = { "default_portal" } end
 
 		-- Modifiers
-		local mods = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
-		})
+		local mods
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			mods = _AA_requireNames(rootName, _AA_MODULE_PATHS.modifiers)
+			if mods and #mods > 0 then break end
+		end
+		if not mods then
+			mods = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "Modifiers" }, { "Data", "Modifiers" }, { "Data", "Challenges" },
+			})
+		end
 		if not mods then
 			mods = _AA_fullScan({
 				"hard", "insane", "chilly", "foggy", "burning",
@@ -479,10 +575,17 @@ local function _AA_discoverData()
 		end
 		if mods then _AA_DATA.MODIFIERS = mods end
 
-		-- Buff / Debuff cards
-		local buffs = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
-		})
+		-- Buff cards
+		local buffs
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			buffs = _AA_requireNames(rootName, _AA_MODULE_PATHS.buffs)
+			if buffs and #buffs > 0 then break end
+		end
+		if not buffs then
+			buffs = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "BuffCards" }, { "Cards" }, { "Data", "Buffs" }, { "Data", "BuffCards" },
+			})
+		end
 		if not buffs then
 			buffs = _AA_fullScan({
 				"buff", "damage", "gold", "range", "cooldown",
@@ -491,9 +594,17 @@ local function _AA_discoverData()
 		end
 		if buffs then _AA_DATA.BUFF_CARDS = buffs end
 
-		local debuffs = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
-		})
+		-- Debuff cards
+		local debuffs
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			debuffs = _AA_requireNames(rootName, _AA_MODULE_PATHS.debuffs)
+			if debuffs and #debuffs > 0 then break end
+		end
+		if not debuffs then
+			debuffs = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "DebuffCards" }, { "Data", "Debuffs" }, { "Data", "DebuffCards" },
+			})
+		end
 		if not debuffs then
 			debuffs = _AA_fullScan({
 				"debuff", "half", "slow", "reduce", "increase", "less",
@@ -502,18 +613,32 @@ local function _AA_discoverData()
 		if debuffs then _AA_DATA.DEBUFF_CARDS = debuffs end
 
 		-- Codes
-		local codes = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
-		})
+		local codes
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			codes = _AA_requireNames(rootName, _AA_MODULE_PATHS.codes)
+			if codes and #codes > 0 then break end
+		end
+		if not codes then
+			codes = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "Codes" }, { "ActiveCodes" }, { "Data", "Codes" }, { "Data", "ActiveCodes" },
+			})
+		end
 		if not codes then
 			codes = _AA_fullScan({ "code", "redeem" }, { maxDepth = 10, maxCount = 200 })
 		end
 		if codes and #codes > 0 then _AA_DATA.KNOWN_CODES = codes end
 
 		-- Tiers
-		local tiers = _AA_pick(game:FindService("ReplicatedStorage"), {
-			{ "Tiers" }, { "Data", "Tiers" },
-		})
+		local tiers
+		for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
+			tiers = _AA_requireNames(rootName, _AA_MODULE_PATHS.tiers)
+			if tiers and #tiers > 0 then break end
+		end
+		if not tiers then
+			tiers = _AA_pick(game:FindService("ReplicatedStorage"), {
+				{ "Tiers" }, { "Data", "Tiers" },
+			})
+		end
 		if not tiers then
 			tiers = _AA_fullScan({
 				"tier", "t1", "t2", "t3", "t4", "t5", "t6",
