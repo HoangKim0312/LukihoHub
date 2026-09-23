@@ -1033,14 +1033,16 @@ end)
 if _AA_Window then
 	-- MacLib on certain executor forks throws "Unable to assign property
 	-- Text. string expected, got nil" inside its internal layout pass.
-	-- That error happens AFTER Window succeeds, so the user sees UI then
-	-- the script dies mid-build. Guard the whole build to keep whatever
-	-- tabs were already created alive and log the failure.
-	local buildOk, buildErr = pcall(function()
+	-- Build each tab inside its own pcall so a single bad tab doesn't
+	-- wipe out every other tab. The Window stays open either way.
+	local function _AA_build(name, fn)
+		local ok, err = pcall(fn)
+		if not ok then _AA_log("ERROR", name .. " tab failed: " .. tostring(err)) end
+	end
 	local TabGroup = _AA_Window:TabGroup()
 
 	-- HOME
-	do
+	_AA_build("Home", function()
 		local tab = TabGroup:Tab({ Name = "Home" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Welcome" })
@@ -1056,10 +1058,10 @@ if _AA_Window then
 			stateLabel.Desc = tostring(info.state or "?")
 			waveLabel.Desc  = tostring(info.currentWave or 0)
 		end)
-	end
+	end)
 
 	-- LOBBY
-	do
+	_AA_build("Lobby", function()
 		local tab = TabGroup:Tab({ Name = "Lobby" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Auto Join Map" })
@@ -1089,10 +1091,10 @@ if _AA_Window then
 		playerSec:Header({ Text = "Auto Join Player" })
 		playerSec:Input({ Name = "Join Selected Player", Placeholder = "Username", AcceptedCharacters = "All", Callback = function(v) _AA_LOBBY.joinPlayerName = v end }, "JoinPlayerInput")
 		playerSec:Toggle({ Name = "Enable Auto Join Player", Default = false, Callback = function(v) if v then _AA_joinPlayer(_AA_LOBBY.joinPlayerName) end end }, "AutoJoinPlayer")
-	end
+	end)
 
 	-- SHOP
-	do
+	_AA_build("Shop", function()
 		local tab = TabGroup:Tab({ Name = "Shop" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Portals" })
@@ -1108,10 +1110,10 @@ if _AA_Window then
 		right:Dropdown({ Name = "Sell Skins Below", Search = false, Multi = false, Required = false, Options = _AA_DATA.SKIN_RARITIES, Default = 2, Callback = function(v) _AA_SHOP.skinMinRarity = v end }, "SkinMinRarity")
 		right:Toggle({ Name = "Auto Sell Skins", Default = false, Callback = function(v) _AA_SHOP.autoSellSkins = v end }, "AutoSellSkins")
 		right:Button({ Name = "Sell Now", Callback = function() _AA_sellSkinBelowMin() end })
-	end
+	end)
 
 	-- IN-GAME
-	do
+	_AA_build("In-Game", function()
 		local tab = TabGroup:Tab({ Name = "In-Game" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Wave Actions" })
@@ -1125,10 +1127,10 @@ if _AA_Window then
 		left:Toggle({ Name = "Auto Place Position", Default = false, Callback = function(v) _AA_INGAME.autoPlace = v end }, "AutoPlace")
 		left:Input({ Name = "Auto Place Unit Id", Placeholder = "unit_id", AcceptedCharacters = "All", Callback = function(v) _AA_INGAME.autoPlaceUnitId = v end }, "PlaceUnitId")
 		left:Slider({ Name = "Auto Place Cap", Default = 6, Minimum = 1, Maximum = 20, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_INGAME.autoPlaceCap = v end }, "PlaceCap")
-	end
+	end)
 
 	-- EVENT CARD
-	do
+	_AA_build("Event Card", function()
 		local tab = TabGroup:Tab({ Name = "Event Card" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Auto Pick" })
@@ -1141,10 +1143,10 @@ if _AA_Window then
 		right:Header({ Text = "Card Priority" })
 		right:Dropdown({ Name = "Buff Priority", Search = true, Multi = true, Required = false, Options = _AA_DATA.BUFF_CARDS, Default = {}, Callback = function(v) for _, x in v do table.insert(_AA_EC.priorityList, x) end end }, "PriorityBuffs")
 		right:Dropdown({ Name = "Debuff Priority", Search = true, Multi = true, Required = false, Options = _AA_DATA.DEBUFF_CARDS, Default = {}, Callback = function(v) for _, x in v do table.insert(_AA_EC.priorityList, x) end end }, "PriorityDebuffs")
-	end
+	end)
 
 	-- MACRO
-	do
+	_AA_build("Macro", function()
 		local tab = TabGroup:Tab({ Name = "Macro" })
 		local selectedMacro = ""
 		local macroDropdown = nil
@@ -1198,10 +1200,10 @@ if _AA_Window then
 				print("[LukihoHub] macro export:", out)
 			end
 		end })
-	end
+	end)
 
 	-- MISC
-	do
+	_AA_build("Misc", function()
 		local tab = TabGroup:Tab({ Name = "Misc" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Webhook" })
@@ -1224,10 +1226,10 @@ if _AA_Window then
 		right:Toggle({ Name = "Auto Claim Quests", Default = false, Callback = function(v) _AA_MISC.autoClaimQuests = v end }, "AutoClaimQuests")
 		right:Toggle({ Name = "Auto Take Daily Quests", Default = false, Callback = function(v) _AA_MISC.autoTakeDailyQuests = v end }, "AutoTakeDailyQuests")
 		right:Button({ Name = "Redeem ALL Codes", Callback = function() _AA_redeemAllCodes() end })
-	end
+	end)
 
 	-- SETTINGS
-	do
+	_AA_build("Settings", function()
 		local tab = TabGroup:Tab({ Name = "Settings" })
 		local left = tab:Section({ Side = "Left" })
 		left:Header({ Text = "Remote Status" })
@@ -1244,14 +1246,9 @@ if _AA_Window then
 		right:Header({ Text = "Interface" })
 		right:Button({ Name = "Unload Hub", Callback = function() _AA_unload() end })
 		right:Paragraph({ Title = "Lukiho", Desc = "RightControl toggles" })
-	end
+	end)
 
 	pcall(function() _AA_Window:Notify({ Title = "LukihoHub", Description = "Loaded. RightControl to toggle." }) end)
-	end)
-	if not buildOk then
-		_AA_log("ERROR", "UI build failed: " .. tostring(buildErr))
-		_AA_log("WARN", "Window is still on screen — RightControl/K toggles it, but controls may be incomplete.")
-	end
 end
 
 ----------------------------------------------------------------
