@@ -859,12 +859,123 @@ local _AA_MACLIB_URLS = {
 	"https://raw.githubusercontent.com/biggaboy212/Maclib/master/maclib.txt",
 }
 
+----------------------------------------------------------------
+-- In-game debug overlay (visible in Potassium without F9).
+-- Always-on ScreenGui pinned top-left, scrollable list of recent
+-- log lines + color-coded by level. Independent from MacLib —
+-- works even if the UI library fails to load.
+----------------------------------------------------------------
+local _AA_LOG_BUFFER = {}
+local _AA_LOG_MAX = 200
+local _AA_debugGui
+
+local function _AA_log(level, msg)
+	local line = string.format("[%s] %s", level, tostring(msg))
+	table.insert(_AA_LOG_BUFFER, 1, { line = line, level = level, t = os.clock() })
+	if #_AA_LOG_BUFFER > _AA_LOG_MAX then
+		table.remove(_AA_LOG_BUFFER)
+	end
+
+	-- Write to executor console too, in case F9 *does* exist.
+	pcall(function() warn(line) end)
+
+	-- Mirror to in-game overlay if it's already built.
+	if _AA_debugGui and _AA_debugGui.list then
+		pcall(function()
+			local entry = Instance.new("TextLabel")
+			entry.BackgroundTransparency = 1
+			entry.Size = UDim2.new(1, 0, 0, 16)
+			entry.Font = Enum.Font.Code
+			entry.TextSize = 12
+			entry.TextXAlignment = Enum.TextXAlignment.Left
+			entry.Text = line
+			entry.TextColor3 = (level == "ERROR" and Color3.fromRGB(255, 90, 90))
+				or (level == "WARN" and Color3.fromRGB(255, 200, 80))
+				or (level == "OK" and Color3.fromRGB(80, 255, 120))
+				or Color3.fromRGB(220, 220, 220)
+			entry.Parent = _AA_debugGui.list
+			if #_AA_debugGui.list:GetChildren() > _AA_LOG_MAX then
+				local first = _AA_debugGui.list:GetChildren()[1]
+				if first then first:Destroy() end
+			end
+		end)
+	end
+end
+
 local function _AA_fetchRaw(url)
 	local ok, body = pcall(function() return (game :: any):HttpGet(url) end)
 	if not ok or type(body) ~= "string" or #body < 100 then
+		_AA_log("WARN", "fetch failed: " .. url)
 		return nil
 	end
 	return body
+end
+
+local function _AA_buildDebugGui()
+	if _AA_debugGui then return end
+	pcall(function()
+		local Players = game:GetService("Players")
+		local LocalPlayer = Players.LocalPlayer
+		if not LocalPlayer then return end
+		local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if not PlayerGui then return end
+
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "LukihoDebug"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.DisplayOrder = 999
+		gui.Parent = PlayerGui
+
+		local frame = Instance.new("Frame")
+		frame.Size = UDim2.fromOffset(440, 320)
+		frame.Position = UDim2.fromOffset(16, 16)
+		frame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+		frame.BackgroundTransparency = 0.15
+		frame.BorderSizePixel = 0
+		frame.Parent = gui
+		Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+		local title = Instance.new("TextLabel")
+		title.Size = UDim2.new(1, 0, 0, 24)
+		title.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+		title.BorderSizePixel = 0
+		title.Font = Enum.Font.GothamBold
+		title.TextSize = 13
+		title.Text = "LukihoHub · Debug Log (Potassium)"
+		title.TextColor3 = Color3.fromRGB(255, 255, 255)
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.PaddingLeft = UDim.new(0, 8)
+		title.Parent = frame
+		Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+
+		local close = Instance.new("TextButton")
+		close.Size = UDim2.fromOffset(24, 24)
+		close.Position = UDim2.new(1, -28, 0, 0)
+		close.BackgroundTransparency = 1
+		close.Font = Enum.Font.GothamBold
+		close.TextSize = 16
+		close.Text = "X"
+		close.TextColor3 = Color3.fromRGB(255, 100, 100)
+		close.Parent = frame
+		close.MouseButton1Click = function() gui:Destroy() end
+
+		local scroll = Instance.new("ScrollingFrame")
+		scroll.Size = UDim2.new(1, -8, 1, -32)
+		scroll.Position = UDim2.fromOffset(4, 28)
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.ScrollBarThickness = 4
+		scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.Parent = frame
+
+		local layout = Instance.new("UIListLayout")
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = scroll
+
+		_AA_debugGui = { gui = gui, list = scroll }
+	end)
 end
 
 local function _AA_loadMacLib()
@@ -872,7 +983,9 @@ local function _AA_loadMacLib()
 	if type(_G._AA_MACLIB_SOURCE) == "string" and #_G._AA_MACLIB_SOURCE > 100 then
 		local ok, lib = pcall(loadstring, _G._AA_MACLIB_SOURCE)
 		if ok and lib then return lib, "preloaded" end
-		warn("[LukihoHub] MacLib loadstring failed on prefetched source")
+		_AA_log("WARN", "MacLib loadstring failed on prefetched source")
+	else
+		_AA_log("INFO", "no prefetched MacLib source from loader")
 	end
 
 	-- 2. Direct fetch via raw GitHub.
@@ -881,18 +994,23 @@ local function _AA_loadMacLib()
 		if body then
 			local ok, lib = pcall(loadstring, body)
 			if ok and lib then return lib, url end
-			warn("[LukihoHub] MacLib loadstring failed for " .. url)
+			_AA_log("WARN", "MacLib loadstring failed for " .. url)
 		end
 	end
 
 	return nil, "all-fetch-failed"
 end
 
+-- Build the debug overlay before anything else so even early errors show.
+_AA_buildDebugGui()
+_AA_log("INFO", string.format("LukihoHub v%s starting (place=%d)", _AA_HUB_VERSION, game.PlaceId))
+
 do
 	local MacLib, via = _AA_loadMacLib()
 	if not MacLib then
-		warn("[LukihoHub] MacLib could not be loaded (" .. tostring(via) .. "); UI will not show.")
+		_AA_log("ERROR", "MacLib unavailable (" .. tostring(via) .. ") — running headless; debug overlay still active.")
 	else
+		_AA_log("OK", "MacLib loaded via " .. tostring(via))
 		local ok, win = pcall(function()
 			return MacLib:Window({
 				Title = "LukihoHub",
@@ -905,11 +1023,12 @@ do
 			})
 		end)
 		if not ok then
-			warn("[LukihoHub] MacLib:Window failed: " .. tostring(win))
+			_AA_log("ERROR", "MacLib:Window threw: " .. tostring(win))
 		elseif not win then
-			warn("[LukihoHub] MacLib returned no window.")
+			_AA_log("ERROR", "MacLib returned no window.")
 		else
 			_AA_Window = win
+			_AA_log("OK", "UI Window created — press RightControl to toggle.")
 		end
 	end
 end
@@ -1144,12 +1263,10 @@ end
 function _AA_unload()
 	for _, c in _AA_connections do pcall(function() c:Disconnect() end) end
 	if _AA_Window then pcall(function() _AA_Window:Unload() end) end
+	if _AA_debugGui and _AA_debugGui.gui then pcall(function() _AA_debugGui.gui:Destroy() end) end
 	_G.LukihoHubUnload = nil
 end
 _G.LukihoHubUnload = _AA_unload
 _G._AA_HUB_VERSION = _AA_HUB_VERSION
 
-print(string.format("[LukihoHub] v%s loaded for place %d", _AA_HUB_VERSION, game.PlaceId))
-if not _AA_Window then
-	warn("[LukihoHub] UI not available — automation features are still running. Press F9 for errors above.")
-end
+_AA_log("OK", string.format("hub ready (place=%d, ui=%s)", game.PlaceId, _AA_Window and "loaded" or "missing"))
