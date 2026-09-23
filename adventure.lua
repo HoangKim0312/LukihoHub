@@ -854,14 +854,6 @@ _AA_on(RunService.Heartbeat, _AA_tick)
 ----------------------------------------------------------------
 local _AA_Window = nil
 
-local _AA_MACLIB_URLS = {
-	-- Vendored copy in our repo (most reliable: same HttpGet level as the hub).
-	"https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/libs/maclib.lua",
-	-- Upstream mirrors (fallbacks if our vendored copy is unavailable).
-	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
-	"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
-}
-
 ----------------------------------------------------------------
 -- In-game debug overlay (visible in Potassium without F9).
 -- Always-on ScreenGui pinned top-left, scrollable list of recent
@@ -982,26 +974,12 @@ local function _AA_buildDebugGui()
 end
 
 local function _AA_loadMacLib()
-	-- 1. Try the source that the loader may have prefetched (same HttpGet level as the loader).
-	if type(_G._AA_MACLIB_SOURCE) == "string" and #_G._AA_MACLIB_SOURCE > 100 then
-		local ok, lib = pcall(loadstring, _G._AA_MACLIB_SOURCE)
-		if ok and lib then return lib, "preloaded" end
-		_AA_log("WARN", "MacLib loadstring failed on prefetched source")
-	else
-		_AA_log("INFO", "no prefetched MacLib source from loader")
+	-- MacLib is injected by loader.lua as _G._AA_MACLIB (already compiled).
+	-- The hub never fetches UI libraries on its own.
+	if type(_G._AA_MACLIB) == "table" then
+		return _G._AA_MACLIB, "injected"
 	end
-
-	-- 2. Direct fetch via raw GitHub.
-	for _, url in _AA_MACLIB_URLS do
-		local body = _AA_fetchRaw(url)
-		if body then
-			local ok, lib = pcall(loadstring, body)
-			if ok and lib then return lib, url end
-			_AA_log("WARN", "MacLib loadstring failed for " .. url)
-		end
-	end
-
-	return nil, "all-fetch-failed"
+	return nil, "not-injected-by-loader"
 end
 
 -- Build the debug overlay before anything else so even early errors show.

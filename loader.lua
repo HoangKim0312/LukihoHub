@@ -1,34 +1,32 @@
 --!strict
--- Public entry. Maps game.PlaceId (Anime Adventures) -> script file.
--- Fetch via HttpGet, then loadstring. No script.Parent dependency.
+-- Public entry. Maps game.PlaceId -> script file.
+-- Loader handles:
+--   1. Fetching the per-game hub script (adventure.lua, future bloxfruit.lua, etc.).
+--   2. Loading the shared MacLib UI library ONCE and exposing it as _G._AA_MACLIB
+--      so every hub can use the same library without each hub re-fetching it.
+--   3. Compiling + running the hub. Hub receives _G._AA_MACLIB preloaded.
 
 if not game:IsLoaded() then
 	game.Loaded:Wait()
 end
 
 local BASE_URL = "https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/"
+local CACHE_BUST = "?cache=" .. tostring(os.time())
+	.. "-" .. tostring(math.floor(os.clock() * 1000))
 
--- place id -> script filename (each is a self-contained monolithic hub)
+-- place id -> script filename (each is a self-contained monolithic hub).
+-- Add more entries here when you ship a hub for a new game; nothing else changes.
 local SCRIPTS_BY_PLACE: { [number]: string } = {
 	[4584892739] = "adventure.lua", -- Anime Adventures
 	[5595353122] = "LukihoHub.client.lua", -- Legacy hub (Obsidian UI)
 }
 
--- UI library sources. The hub uses these only as a best-effort; if every
--- mirror fails, the script still runs (automation features are headless).
-local MACLIB_URLS = {
-	BASE_URL .. "libs/maclib.lua",
-	"https://raw.githubusercontent.com/biggaboy212/Maclib/main/maclib.txt",
-	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
-	"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
-}
-
-local function tryFetch(url)
+local function tryFetch(url: string): (string?, string?)
 	local ok, body = pcall(function()
 		return (game :: any):HttpGet(url)
 	end)
 	if not ok or type(body) ~= "string" or #body < 100 then
-		return nil
+		return nil, type(body) == "string" and body or tostring(body)
 	end
 	return body
 end
@@ -38,8 +36,42 @@ if not scriptPath then
 	return
 end
 
-local CACHE_BUST = "?cache=" .. tostring(os.time())
-	.. "-" .. tostring(math.floor(os.clock() * 1000))
+-- Loader-level MacLib URLs. Keep these local to the loader so hubs stay
+-- UI-library-agnostic. The vendored copy in our own repo is the primary
+-- source so we are not at the mercy of upstream GitHub releases.
+local MACLIB_URLS = {
+	BASE_URL .. "libs/maclib.lua",
+	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
+}
+
+local macLib, macLibErr
+for _, url in MACLIB_URLS do
+	local body, fetchErr = tryFetch(url .. CACHE_BUST)
+	if body then
+		local chunk, compileErr = loadstring(body)
+		if chunk then
+			local ok, libOrErr = pcall(chunk)
+			if ok and type(libOrErr) == "table" then
+				macLib = libOrErr
+				break
+			else
+				macLibErr = "runtime: " .. tostring(libOrErr)
+			end
+		else
+			macLibErr = "compile: " .. tostring(compileErr)
+		end
+	else
+		macLibErr = "fetch(" .. url .. "): " .. tostring(fetchErr)
+	end
+end
+
+if macLib then
+	_G._AA_MACLIB = macLib
+else
+	_G._AA_MACLIB = nil
+	warn("[Lukiho] MacLib unavailable: " .. tostring(macLibErr) .. " — hub will run headless")
+end
 
 local hubUrl = BASE_URL .. scriptPath .. CACHE_BUST
 
@@ -48,20 +80,6 @@ local fetched, source = pcall(function()
 end)
 if not fetched then
 	error("[Lukiho] Could not fetch script. Check repo visibility / branch / filename: " .. tostring(source))
-end
-
--- Pre-fetch the UI library on this level (top-level loadstring has the
--- most reliable HttpGet permissions across executors). If any mirror works,
--- hand the source to the hub so it doesn't have to refetch.
-local macLibSource = nil
-for _, url in MACLIB_URLS do
-	macLibSource = tryFetch(url .. CACHE_BUST)
-	if macLibSource then break end
-end
-if macLibSource then
-	_G._AA_MACLIB_SOURCE = macLibSource
-else
-	_G._AA_MACLIB_SOURCE = nil
 end
 
 local compile, syntaxError = loadstring(source)
