@@ -855,8 +855,11 @@ _AA_on(RunService.Heartbeat, _AA_tick)
 local _AA_Window = nil
 
 local _AA_MACLIB_URLS = {
-	"https://raw.githubusercontent.com/biggaboy212/Maclib/main/maclib.txt",
-	"https://raw.githubusercontent.com/biggaboy212/Maclib/master/maclib.txt",
+	-- Vendored copy in our repo (most reliable: same HttpGet level as the hub).
+	"https://raw.githubusercontent.com/HoangKim0312/LukihoHub/main/libs/maclib.lua",
+	-- Upstream mirrors (fallbacks if our vendored copy is unavailable).
+	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
 }
 
 ----------------------------------------------------------------

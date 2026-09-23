@@ -17,8 +17,10 @@ local SCRIPTS_BY_PLACE: { [number]: string } = {
 -- UI library sources. The hub uses these only as a best-effort; if every
 -- mirror fails, the script still runs (automation features are headless).
 local MACLIB_URLS = {
+	BASE_URL .. "libs/maclib.lua",
 	"https://raw.githubusercontent.com/biggaboy212/Maclib/main/maclib.txt",
-	"https://raw.githubusercontent.com/biggaboy212/Maclib/master/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
 }
 
 local function tryFetch(url)
@@ -36,9 +38,10 @@ if not scriptPath then
 	return
 end
 
-local hubUrl = BASE_URL .. scriptPath
-	.. "?cache=" .. tostring(os.time())
+local CACHE_BUST = "?cache=" .. tostring(os.time())
 	.. "-" .. tostring(math.floor(os.clock() * 1000))
+
+local hubUrl = BASE_URL .. scriptPath .. CACHE_BUST
 
 local fetched, source = pcall(function()
 	return (game :: any):HttpGet(hubUrl)
@@ -52,7 +55,7 @@ end
 -- hand the source to the hub so it doesn't have to refetch.
 local macLibSource = nil
 for _, url in MACLIB_URLS do
-	macLibSource = tryFetch(url)
+	macLibSource = tryFetch(url .. CACHE_BUST)
 	if macLibSource then break end
 end
 if macLibSource then
