@@ -854,24 +854,53 @@ _AA_on(RunService.Heartbeat, _AA_tick)
 ----------------------------------------------------------------
 local _AA_Window = nil
 
-pcall(function()
-	local MacLib = loadstring(game:HttpGet(
-		"https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt"
-	))()
-	_AA_Window = MacLib:Window({
-		Title = "LukihoHub",
-		Subtitle = "Anime Adventures | v" .. _AA_HUB_VERSION,
-		Size = UDim2.fromOffset(820, 580),
-		DragStyle = 1,
-		ShowUserInfo = false,
-		Keybind = Enum.KeyCode.RightControl,
-		AcrylicBlur = false,
-	})
-end)
+local _AA_MACLIB_URLS = {
+	"https://github.com/biggaboy212/Maclib/releases/download/9.Maclib/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/download/8.Maclib/maclib.txt",
+	"https://github.com/biggaboy212/Maclib/releases/download/7.Maclib/maclib.txt",
+}
 
-if not _AA_Window then
-	warn("[LukihoHub] MacLib failed to load; features run but no UI")
-else
+local function _AA_loadMacLib()
+	for _, url in _AA_MACLIB_URLS do
+		local ok, src = pcall(function() return (game :: any):HttpGet(url) end)
+		if ok and type(src) == "string" and #src > 100 then
+			local ok2, lib = pcall(loadstring(src))
+			if ok2 and lib then return lib end
+			warn("[LukihoHub] MacLib loadstring failed for " .. url)
+		else
+			warn("[LukihoHub] MacLib fetch failed for " .. url)
+		end
+	end
+	return nil
+end
+
+do
+	local MacLib = _AA_loadMacLib()
+	if not MacLib then
+		warn("[LukihoHub] MacLib could not be loaded from any mirror; UI will not show.")
+	else
+		local ok, win = pcall(function()
+			return MacLib:Window({
+				Title = "LukihoHub",
+				Subtitle = "Anime Adventures | v" .. _AA_HUB_VERSION,
+				Size = UDim2.fromOffset(820, 580),
+				DragStyle = 1,
+				ShowUserInfo = false,
+				Keybind = Enum.KeyCode.RightControl,
+				AcrylicBlur = false,
+			})
+		end)
+		if not ok then
+			warn("[LukihoHub] MacLib:Window failed: " .. tostring(win))
+		elseif not win then
+			warn("[LukihoHub] MacLib returned no window.")
+		else
+			_AA_Window = win
+		end
+	end
+end
+
+if _AA_Window then
 	local TabGroup = _AA_Window:TabGroup()
 
 	-- HOME
@@ -1096,3 +1125,6 @@ _G.LukihoHubUnload = _AA_unload
 _G._AA_HUB_VERSION = _AA_HUB_VERSION
 
 print(string.format("[LukihoHub] v%s loaded for place %d", _AA_HUB_VERSION, game.PlaceId))
+if not _AA_Window then
+	warn("[LukihoHub] UI not available — automation features are still running. Press F9 for errors above.")
+end
