@@ -20,22 +20,67 @@ local function _boot()
 	local CACHE_BUST = "?cache=" .. tostring(os.time())
 		.. "-" .. tostring(math.floor(os.clock() * 1000))
 
-	-- place id -> script filename (each is a self-contained monolithic hub).
-	-- Add more entries here when you ship a hub for a new game; nothing else changes.
-	local SCRIPTS_BY_PLACE = {
+	-- Match by game.UniverseId instead of PlaceId so the same hub runs on
+	-- every Anime Adventures place (lobby + every story/infinite/raid
+	-- game instance). Universes are stable across place versions.
+	local SCRIPTS_BY_UNIVERSE = {
 		-- Anime Adventures
-		[4584892739]  = "adventure.lua",        -- legacy place id (pre-2025)
-		[10715453071] = "adventure.lua",        -- current game id (post-update)
-		-- Legacy hub
-		[5595353122]  = "LukihoHub.client.lua", -- Legacy hub (Obsidian UI)
-		-- Anime Adventures PlaceId variants
-		[94823097601547] = "adventure.lua",
+		[4646479491]  = "adventure.lua", -- AA legacy + current universe
+		-- Legacy hub (different universe entirely)
+		[--[[ legacy universe id will go here ]] 0] = "LukihoHub.client.lua",
 	}
 
-	local scriptPath = SCRIPTS_BY_PLACE[game.PlaceId]
+	-- Universe-id-prefix table for AA so new place versions stay covered.
+	local AA_UNIVERSE_IDS = {
+		[4646479491] = true,
+	}
+
+	-- Find the script to run for the current place. We try:
+	--   1. Direct PlaceId match (so legacy/different hubs still dispatch).
+	--   2. UniverseId match (same game, any place inside).
+	--   3. AA universe fallback (adventure.lua).
+	local PLACE_TO_SCRIPT = {
+		[4584892739]    = "adventure.lua",
+		[10715453071]   = "adventure.lua",
+		[94823097601547] = "adventure.lua",
+		[5595353122]    = "LukihoHub.client.lua",
+	}
+
+	local scriptPath = PLACE_TO_SCRIPT[game.PlaceId]
 	if not scriptPath then
-		warn("[Lukiho] no hub registered for placeId " .. tostring(game.PlaceId) .. " — exiting")
+		if AA_UNIVERSE_IDS[game.GameId] then
+			scriptPath = "adventure.lua"
+			print(string.format("[Lukiho] AA universe matched (gameId=%d), using adventure.lua", game.GameId))
+		elseif SCRIPTS_BY_UNIVERSE[game.GameId] then
+			scriptPath = SCRIPTS_BY_UNIVERSE[game.GameId]
+		end
+	end
+	if not scriptPath then
+		warn("[Lukiho] no hub registered for placeId=" .. tostring(game.PlaceId)
+			.. " gameId=" .. tostring(game.GameId) .. " — exiting")
 		return
+	end
+
+	-- Build a self-restart command that re-executes this loader after the
+	-- server teleports us (e.g. play a story map -> new place instance).
+	-- queue_on_teleport is supported by Synapse X, Fluxus, Wave, etc.
+	-- If the executor doesn't expose it we silently fall back; the hub will
+	-- still work for non-teleport flows.
+	local RESTART_CMD
+	if type(queue_on_teleport) == "function" or type(fluxus) == "table"
+		or type(syn) == "table" then
+		-- Re-fetch + execute the hub source directly to avoid a second HTTP
+		-- round-trip for the loader in the destination place.
+		RESTART_CMD = string.format([[
+local ok, body = pcall(function()
+	if syn and syn.request then return syn.request({ Url = %q, Method = "GET" }).Body end
+	if request then return request({ Url = %q, Method = "GET" }).Body end
+	if game and game.HttpGet then return game:HttpGet(%q) end
+end)
+if ok and type(body) == "string" and #body > 100 then
+	local fn, err = loadstring(body)
+	if fn then pcall(fn) end
+end]], BASE_URL .. scriptPath, BASE_URL .. scriptPath, BASE_URL .. scriptPath)
 	end
 
 	local HttpGet = game and game.HttpGet
@@ -107,6 +152,22 @@ local function _boot()
 	end
 
 	print("[Lukiho] hub started")
+
+	-- Ask the executor to re-run the hub after any teleport triggered by
+	-- the game (joining a story match, raid, etc.). queue_on_teleport is
+	-- exposed by Synapse X / Fluxus / Wave. Some executors use a global
+	-- `fluxus` object instead — handle those.
+	if RESTART_CMD then
+		pcall(function()
+			if type(queue_on_teleport) == "function" then
+				queue_on_teleport(RESTART_CMD)
+				print("[Lukiho] queue_on_teleport registered (story/raid auto-rerun)")
+			elseif type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then
+				fluxus.queue_on_teleport(RESTART_CMD)
+				print("[Lukiho] fluxus.queue_on_teleport registered")
+			end
+		end)
+	end
 end
 
 local ok, err = pcall(_boot)
