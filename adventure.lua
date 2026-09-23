@@ -1505,6 +1505,118 @@ local function _AA_tryReconnect()
 	pcall(function() TeleportService:Teleport(game.PlaceId, Players.LocalPlayer) end)
 end
 
+-- Queue a Lua chunk to run after the next teleport. Different executors expose
+-- this under different names:
+--   * queue_on_teleport(code)        — Synapse X, Script-Ware
+--   * syn.queue_on_teleport(code)    — Synapse X
+--   * fluxus.queue_on_teleport(code) — Fluxus
+--   * writefile + autoexec folder    — universal fallback (Android/Fluxus)
+-- Returns true if the chunk was queued, false otherwise.
+local function _AA_queueOnTeleport(code)
+	if type(code) ~= "string" or code == "" then return false end
+
+	-- 1) Direct executor API
+	for _, fnName in { "queue_on_teleport", "queueonteleport" } do
+		local fn = getfenv and getfenv()[fnName] or nil
+		if type(fn) == "function" then
+			local ok = pcall(fn, code)
+			if ok then return true end
+		end
+	end
+	if type(syn) == "table" and type(syn.queue_on_teleport) == "function" then
+		local ok = pcall(syn.queue_on_teleport, code)
+		if ok then return true end
+	end
+	if type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then
+		local ok = pcall(fluxus.queue_on_teleport, code)
+		if ok then return true end
+	end
+
+	-- 2) File-based fallback. Auto-execute folders we know of:
+	--      Synapse X:    /workspace/AutoExec
+	--      Script-Ware:  /workspace/AutoExec
+	--      Fluxus:       /workspace/AutoExec
+	--      Delta:        /workspace/Autoexec (note capital A in some forks)
+	--      Codex:        /workspace/autoexec
+	--      Generic:      %workspace%/AutoExecuteFiles or /Autoexec
+	if type(writefile) == "function" and type(readfile) == "function" then
+		local tries = {
+			"AutoExec",
+			"Autoexec",
+			"autoexec",
+			"AutoExecuteFiles",
+		}
+		local markers = {
+			"queue_on_teleport.lua",
+			"on_teleport.lua",
+			"lukiho_teleport.lua",
+		}
+		for _, folder in tries do
+			for _, name in markers do
+				local ok, err = pcall(function()
+					local path = folder .. "/" .. name
+					-- Append the new chunk; keep prior code intact.
+					local prev = ""
+					pcall(function() prev = readfile(path) end)
+					writefile(path, prev .. "\n" .. code)
+				end)
+				if ok then return true end
+			end
+		end
+	end
+
+	return false
+end
+
+-- Queue the hub itself (LukihoHub.client.lua) so it re-loads on the new
+-- server. We rebuild the hub from the GitHub raw URL via the loader so the
+-- executor always runs the latest committed version. If queue_on_teleport
+-- isn't available, we fall back to writing to the autoexec folder; the user
+-- will still see the hub again on the next manual join.
+local function _AA_queueHubOnTeleport()
+	local repo = "HoangKim0312/LukihoHub"
+	local branch = "main"
+	local paths = {
+		"https://raw.githubusercontent.com/" .. repo .. "/" .. branch .. "/LukihoHub.client.lua",
+		"https://raw.githubusercontent.com/" .. repo .. "/" .. branch .. "/loader.lua",
+	}
+	local body = table.concat(paths, "\n") .. [[
+
+
+-- Auto-queued by LukihoHub: try to fetch and run the hub on this server.
+task.defer(function()
+	pcall(function()
+		if type(game) == "table" and type(loadstring) == "function" then
+			for _, url in ipairs({ ... }) do
+				local ok, body = pcall(function()
+					if type(request) == "function" or type(http_request) == "function" then
+						local req = type(request) == "function" and request or http_request
+						local res = req({ Url = url, Method = "GET" })
+						if res and res.Body and #res.Body > 1000 then return res.Body end
+					end
+					if type(game) == "table" and type(game.HttpGet) == "function" then
+						return game:HttpGet(url)
+					end
+					return nil
+				end)
+				if ok and type(body) == "string" and #body > 1000 then
+					local fn, err = loadstring(body)
+					if fn then pcall(fn); return end
+				end
+			end
+		end
+	end)
+end)
+]]
+	local queued = _AA_queueOnTeleport(body)
+	if queued then
+		_AA_log("OK", "Hub queued on teleport (will auto-reload)")
+	else
+		_AA_log("WRN", "queue_on_teleport unavailable; install executor with autoexec folder to persist hub")
+	end
+	return queued
+end
+
 _AA_on(Players.PlayerRemoving, function(player)
 	if player == Players.LocalPlayer and _AA_MISC.autoReconnect then
 		task.delay(2, function() pcall(function() TeleportService:Teleport(game.PlaceId) end) end)
@@ -1797,6 +1909,26 @@ _AA_build("Lobby", function()
 		left:Toggle({ Name = "Auto Join", Default = false, Callback = function(v) _AA_LOBBY.autoJoin = v; _AA_log("OK", "Lobby AutoJoin=" .. tostring(v)) end }, "AutoJoin")
 		left:Slider({ Name = "Auto Start Delay (s)", Default = 5, Minimum = 0, Maximum = 30, DisplayMethod = "Value", Precision = 0, Callback = function(v) _AA_LOBBY.autoStartDelay = v end }, "AutoStartDelay")
 		left:Toggle({ Name = "Auto Start", Default = false, Callback = function(v) _AA_LOBBY.autoStart = v end }, "AutoStart")
+		left:Button({ Name = "Start Now", Callback = function()
+			local mode = _AA_LOBBY.joinMode or "Story"
+			local ok = false
+			if mode == "Story"      then ok = _AA_joinStory()
+			elseif mode == "Infinite" then ok = _AA_joinInfinite()
+			elseif mode == "LegendStage" then ok = _AA_joinLegend()
+			elseif mode == "Raid"   then ok = _AA_joinRaid()
+			end
+			_AA_log(ok and "OK" or "ERR", "Manual join: " .. mode
+				.. " map=" .. tostring(_AA_LOBBY.selectedMap)
+				.. " act=" .. tostring(_AA_LOBBY.selectedAct)
+				.. " diff=" .. tostring(_AA_LOBBY.difficulty))
+			-- After the lobby is joined, AA normally teleports the player
+			-- to a sub-place. Re-queue the hub so it auto-loads there.
+			_AA_queueHubOnTeleport()
+		end }, "StartNow")
+		left:Button({ Name = "Teleport to current Place (rejoin)", Callback = function()
+			_AA_queueHubOnTeleport()
+			_AA_tryReconnect()
+		end }, "TeleportRejoin")
 		local right = tab:Section({ Side = "Right" })
 		right:Header({ Text = "Auto Challenge" })
 		right:Dropdown({ Name = "Ignore Worlds", Search = true, Multi = true, Required = false, Options = _AA_DATA.MAPS, Default = {}, Callback = function(v) _AA_LOBBY.ignoreWorlds = v end }, "IgnoreWorlds")
