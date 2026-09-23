@@ -479,19 +479,48 @@ local _AA_DATA_ROOTS = {
 	},
 }
 
+-- Display-name field aliases that Anime Adventures has shipped across
+-- versions. We check them in priority order; first match wins. Keep this
+-- list focused on strings — see the comment for _AA_collectNamesFromTable.
+local _AA_DISPLAY_KEYS = {
+	"name", "display_name", "displayName", "DisplayName",
+	"title", "Title", "_name", "_display_name", "label", "Label",
+}
+
+-- Test whether a table entry carries a usable display name. We also pull
+-- the Instance `.Name` if the caller passed one as `instanceName`.
+local function _AA_pickDisplayName(entry, instanceName)
+	-- Instance .Name first if available, since AA sometimes uses the
+	-- ModuleScript child .Name for the human label.
+	if type(instanceName) == "string" and instanceName ~= "" then
+		return instanceName
+	end
+	for _, key in _AA_DISPLAY_KEYS do
+		local v = entry[key]
+		if type(v) == "string" and v ~= "" then
+			return v
+		end
+	end
+	-- id as last resort — not great UX, but at least the row is selectable.
+	local id = entry.id
+	if type(id) == "string" and id ~= "" then
+		return id
+	end
+	return nil
+end
+
 local function _AA_collectNamesFromTable(tbl, out, depth)
 	out = out or {}
 	depth = depth or 0
 	if depth > 4 or type(tbl) ~= "table" then return out end
 	for _, v in pairs(tbl) do
 		if type(v) == "table" then
-			if type(v.name) == "string" and v.name ~= "" then
-				out[#out + 1] = v.name
-			elseif type(v.id) == "string" and v.id ~= "" then
-				-- Some modules expose id but not name — keep id as a fallback
-				-- label so the dropdown still has something to show.
-				out[#out + 1] = v.id
+			local picked = _AA_pickDisplayName(v)
+			if picked then
+				out[#out + 1] = picked
 			else
+				-- Maybe this level is just a container of arrays/lists of
+				-- entries; recurse one more level to find them.
 				_AA_collectNamesFromTable(v, out, depth + 1)
 			end
 		end
@@ -511,10 +540,12 @@ local function _AA_dedupe(list)
 end
 
 -- Walk a path of FindFirstChild and require the resulting ModuleScript.
--- Tries ReplicatedStorage first, then ServerStorage as a mirror (some
--- executors expose it, some don't).
+-- Returns the Instance node and the required table on success (some callers
+-- want the .Name of the ModuleScript itself when the inner table has no
+-- display label). Tries ReplicatedStorage first, then ServerStorage as a
+-- mirror (some executors expose it, some don't).
 local function _AA_requireNode(pathSegments)
-	if type(require) ~= "function" then return nil end
+	if type(require) ~= "function" then return nil, nil end
 	for _, rootName in { "ReplicatedStorage", "ServerStorage" } do
 		local ok, root = pcall(game.FindService, game, rootName)
 		if ok and root then
@@ -527,25 +558,34 @@ local function _AA_requireNode(pathSegments)
 			if found and node and node:IsA("ModuleScript") then
 				local ok2, result = pcall(require, node)
 				if ok2 and type(result) == "table" then
-					return result
+					return node, result
 				end
 			end
 		end
 	end
-	return nil
+	return nil, nil
 end
 
 -- For each aggregator, require its ModuleScript and return all names.
+-- We also seed the result with the ModuleScript's own `.Name` — AA often
+-- ships wrap-up files like `Maps_Pretesting` whose child ModuleScripts are
+-- named after the world (e.g. "Planet Greenie", "Walled City") and the
+-- inside table sometimes lacks a `.name` field.
 local function _AA_requireAggregator(entry)
-	local tbl = _AA_requireNode(entry.path)
+	local node, tbl = _AA_requireNode(entry.path)
 	if not tbl then return nil end
-	return _AA_dedupe(_AA_collectNamesFromTable(tbl))
+	local out = _AA_collectNamesFromTable(tbl)
+	-- Prepend the ModuleScript's Instance .Name if it's a meaningful label.
+	if node and node:IsA("Instance") and node.Name ~= "" then
+		out[#out + 1] = node.Name
+	end
+	return _AA_dedupe(out)
 end
 
 -- For constant modules (GameplaySettings), pull only specific top-level
 -- string-array fields.
 local function _AA_requireConstants(entry)
-	local tbl = _AA_requireNode(entry.path)
+	local _, tbl = _AA_requireNode(entry.path)
 	if not tbl then return nil end
 	local out = {}
 	for _, field in entry.fields do
@@ -554,8 +594,9 @@ local function _AA_requireConstants(entry)
 			for _, item in pairs(v) do
 				if type(item) == "string" then
 					out[#out + 1] = item
-				elseif type(item) == "table" and type(item.name) == "string" then
-					out[#out + 1] = item.name
+				elseif type(item) == "table" then
+					local picked = _AA_pickDisplayName(item)
+					if picked then out[#out + 1] = picked end
 				end
 			end
 		elseif type(v) == "string" then
@@ -566,8 +607,10 @@ local function _AA_requireConstants(entry)
 end
 
 -- Walk a folder recursively and require every ModuleScript found, then collect
--- names from the result. `predicate(name)` lets callers filter for things
+-- names from the result. `predicate(entry, node)` lets callers filter for things
 -- like portal entries (id contains "_portal" or entry._portal_only_level).
+-- The ModuleScript's own `.Name` is ALWAYS taken as a candidate so we don't
+-- miss worlds whose entry table lacks a `.name` field.
 local function _AA_requireFolder(folderSegments, predicate)
 	if type(require) ~= "function" then return nil end
 	local folder
@@ -586,21 +629,37 @@ local function _AA_requireFolder(folderSegments, predicate)
 	if not folder then return nil end
 
 	local out = {}
+	local function pickName(entry, node)
+		local picked = _AA_pickDisplayName(entry, node and node.Name)
+		return picked
+	end
+
 	local function walk(node)
 		if not node then return end
 		if node:IsA("ModuleScript") then
 			local ok, tbl = pcall(require, node)
 			if ok and type(tbl) == "table" then
+				local sawEntry = false
 				for _, v in pairs(tbl) do
 					if type(v) == "table" then
 						local matches = predicate and predicate(v, node) or true
 						if matches then
-							if type(v.name) == "string" and v.name ~= "" then
-								out[#out + 1] = v.name
-							elseif type(v.id) == "string" and v.id ~= "" then
-								out[#out + 1] = v.id
+							local n = pickName(v, node)
+							if n then
+								out[#out + 1] = n
+								sawEntry = true
 							end
 						end
+					end
+				end
+				-- Even when predicate filtered everything out, the
+				-- ModuleScript's own Name is still valuable context.
+				if not sawEntry then
+					local n = pickName({}, node)
+					if n and n ~= node.Name then
+						-- Empty entry + node.Name would normally give us
+						-- node.Name back, so this branch is mostly defensive.
+						out[#out + 1] = n
 					end
 				end
 			end
